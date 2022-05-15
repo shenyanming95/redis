@@ -40,10 +40,24 @@ extern const char *SDS_NOINIT;
 #include <stdarg.h>
 #include <stdint.h>
 
+// redis给字符数组char*取了一个别名, 也即sds, 所以在redis中的所有字符数组都是sds
 typedef char *sds;
+
+/**
+ * redis 在设计 SDS 结构, 定义了5种类型(就是下面5种), 它们的区别在于：
+ * 变量 len、alloc 的类型不同, 比如说 sdshdr8类型的SDS, 它的变量类型为
+ * 8位无符号整型. 这样设计是为了节省内存, 比方说, 如果一个字符串才10个字节,
+ * 若使用 sdshdr32 类型去表示, 它的变量 len、alloc 自己就已经4个字节了,
+ * 直接比字符串本身还大。
+ */
 
 /* Note: sdshdr5 is never used, we just access the flags byte directly.
  * However is here to document the layout of type 5 SDS strings. */
+
+// __attribute__ ((__packed__)) 关键字是一个编译优化. 它的作用在于：
+// 默认情况下, 编译器会对结构体做8字节的内存对齐, 即当一个结构体变量之和不足8字节时,
+// 还是会为其分配8字节. 但是如果加了这个关键字, 编译器就会采用紧凑型的方式分配内存,
+// 即实际需要多少就分配多少.
 struct __attribute__ ((__packed__)) sdshdr5 {
     unsigned char flags; /* 3 lsb of type, and 5 msb of string length */
     char buf[];
@@ -67,9 +81,24 @@ struct __attribute__ ((__packed__)) sdshdr32 {
     char buf[];
 };
 struct __attribute__ ((__packed__)) sdshdr64 {
-    uint64_t len; /* used */
-    uint64_t alloc; /* excluding the header and null terminator */
+    /**
+     * 字符数组当前的长度
+     */
+    uint64_t len;
+
+    /**
+     * 字符数组分配的空间长度, 不包括元数据和"/0"截止字符
+     */
+    uint64_t alloc;
+
+    /**
+     * SDS的类型
+     */
     unsigned char flags; /* 3 lsb of type, 5 unused bits */
+
+    /**
+     * 底层真正存储的数组
+     */
     char buf[];
 };
 

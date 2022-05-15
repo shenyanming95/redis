@@ -47,6 +47,7 @@
 typedef struct dictEntry {
     void *key;
     union {
+        // 指向实际值的指针
         void *val;
         uint64_t u64;
         int64_t s64;
@@ -76,8 +77,10 @@ typedef struct dictht {
 typedef struct dict {
     dictType *type;
     void *privdata;
+    // 两个hash表, 用于rehash操作
     dictht ht[2];
-    long rehashidx; /* rehashing not in progress if rehashidx == -1 */
+    // 当这个值为-1时, 表示hash表没有在进行rehash操作
+    long rehashidx;
     unsigned long iterators; /* number of iterators currently running */
 } dict;
 
