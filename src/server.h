@@ -87,7 +87,7 @@ typedef long long ustime_t; /* microsecond time type. */
 #define C_OK                    0
 #define C_ERR                   -1
 
-/* Static server configuration */
+/* redis server 配置的默认值 */
 #define CONFIG_DEFAULT_HZ        10             /* Time interrupt calls/sec. */
 #define CONFIG_MIN_HZ            1
 #define CONFIG_MAX_HZ            500
@@ -641,15 +641,15 @@ typedef struct clientReplyBlock {
  * by integers from 0 (the default database) up to the max configured
  * database. The database number is the 'id' field in the structure. */
 typedef struct redisDb {
-    dict *dict;                 /* The keyspace for this DB */
-    dict *expires;              /* Timeout of keys with a timeout set */
-    dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
-    dict *ready_keys;           /* Blocked keys that received a PUSH */
-    dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
-    int id;                     /* Database ID */
-    long long avg_ttl;          /* Average TTL, just for stats */
-    unsigned long expires_cursor; /* Cursor of the active expire cycle. */
-    list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
+    dict *dict;                     /* The keyspace for this DB */
+    dict *expires;                  /* Timeout of keys with a timeout set */
+    dict *blocking_keys;            /* Keys with clients waiting for data (BLPOP)*/
+    dict *ready_keys;               /* Blocked keys that received a PUSH */
+    dict *watched_keys;             /* WATCHED keys for MULTI/EXEC CAS */
+    int id;                         /* Database ID */
+    long long avg_ttl;              /* Average TTL, just for stats */
+    unsigned long expires_cursor;   /* Cursor of the active expire cycle. */
+    list *defrag_later;             /* List of key names to attempt to defrag one by one, gradually. */
 } redisDb;
 
 /* Client MULTI/EXEC state */
@@ -1026,6 +1026,10 @@ struct clusterState;
 #define CHILD_INFO_TYPE_AOF 1
 #define CHILD_INFO_TYPE_MODULE 3
 
+/**
+ * redis运行所需的各种参数. 对参数的设置会经过三轮, 依次是：
+ * 默认配置值 → 命令行启动参数 → 配置文件配置值.
+ */
 struct redisServer {
     /* General */
     pid_t pid;                  /* Main process pid. */

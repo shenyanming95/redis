@@ -2740,6 +2740,8 @@ void initServer(void) {
 
     createSharedObjects();
     adjustOpenFilesLimit();
+
+    // 创建事件循环框架
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
@@ -2775,7 +2777,7 @@ void initServer(void) {
         exit(1);
     }
 
-    /* Create the Redis databases, and initialize other internal state. */
+    /* redis支持多个数据库, 这里就是初始化每一个数据库  */
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
@@ -2837,13 +2839,13 @@ void initServer(void) {
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
      * expired keys and so forth. */
+    // 为后台任务创建定时事件
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
     }
 
-    /* Create an event handler for accepting new connections in TCP and Unix
-     * domain sockets. */
+    /* 监听每个ip可能发生的客户端连接, 创建监听事件同时指定处理函数acceptTcpHandler() */
     for (j = 0; j < server.ipfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
             acceptTcpHandler,NULL) == AE_ERR)
@@ -4913,7 +4915,9 @@ int iAmMaster(void) {
             (server.cluster_enabled && nodeIsMaster(server.cluster->myself)));
 }
 
-
+/**
+ * redis实例启动的入口点
+ */
 int main(int argc, char **argv) {
     struct timeval tv;
     int j;
@@ -4948,6 +4952,7 @@ int main(int argc, char **argv) {
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
     spt_init(argc, argv);
 #endif
+    // 基本的初始化工作
     setlocale(LC_COLLATE,"");
     tzset(); /* Populates 'timezone' global. */
     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
@@ -4971,14 +4976,16 @@ int main(int argc, char **argv) {
     server.exec_argv[argc] = NULL;
     for (j = 0; j < argc; j++) server.exec_argv[j] = zstrdup(argv[j]);
 
+    // 判断redis server是否要以哨兵模式启动
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
     if (server.sentinel_mode) {
-        initSentinelConfig();
-        initSentinel();
+        initSentinelConfig(); // 初始化哨兵的配置
+        initSentinel();       // 初始化哨兵模式
     }
 
+    // 判断是否要执行RDB检测或AOF检测
     /* Check if we need to start in redis-check-rdb/aof mode. We just execute
      * the program main. However the program is part of the Redis executable
      * so that we can easily execute an RDB check on loading errors. */
@@ -4987,6 +4994,8 @@ int main(int argc, char **argv) {
     else if (strstr(argv[0],"redis-check-aof") != NULL)
         redis_check_aof_main(argc,argv);
 
+    // 解析main函数入参参数, 并调用loadServerConfig()函数, 对命令行参数和配置文件中的参数
+    // 进行合并处理, 并设置配置文件中的各个参数的合理配置.
     if (argc >= 2) {
         j = 1; /* First option to parse in argv[] */
         sds options = sdsempty();
@@ -5072,12 +5081,15 @@ int main(int argc, char **argv) {
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
+    // 初始化redis server, 包括: server资源管理所需的数据结构初始化、键值对数据库初始化、server网络框架初始化
     initServer();
     if (background || server.pidfile) createPidFile();
     redisSetProcTitle(argv[0]);
     redisAsciiArt();
     checkTcpBacklogSettings();
 
+    // 如果非哨兵模式, 就按照普通模式启动, 从磁盘上加载AOF或者RDB文件, 恢复之前的数据.
+    // 反之如果是哨兵模式, 调用sentinelRunning()函数启动哨兵模式.
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
         serverLog(LL_WARNING,"Server initialized");
@@ -5118,8 +5130,11 @@ int main(int argc, char **argv) {
         serverLog(LL_WARNING,"WARNING: You specified a maxmemory value that is less than 1MB (current value is %llu bytes). Are you sure this is what you really want?", server.maxmemory);
     }
 
+    // 设置一个回调函数, 在每次进入事件循环之前, server需要执行的操作
     aeSetBeforeSleepProc(server.el,beforeSleep);
+    // 设置一个回调函数, 在每次事件循环结束后server需要执行的操作.
     aeSetAfterSleepProc(server.el,afterSleep);
+    // 调用aeMain()进入事件驱动框架, 开始循环处理各种触发的事件.
     aeMain(server.el);
     aeDeleteEventLoop(server.el);
     return 0;

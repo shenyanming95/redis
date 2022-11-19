@@ -519,6 +519,10 @@ int aeWait(int fd, int mask, long long milliseconds) {
     }
 }
 
+/**
+ * 循环执行, 处理收到的客户端请求
+ * @param eventLoop 事件循环指针
+ */
 void aeMain(aeEventLoop *eventLoop) {
     eventLoop->stop = 0;
     while (!eventLoop->stop) {
