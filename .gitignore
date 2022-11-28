@@ -34,3 +34,5 @@ Makefile.dep
 .vscode/*
 .idea/*
 .DS_Store
+*.sh
+*.exe
