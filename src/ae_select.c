@@ -1,41 +1,14 @@
-/* Select()-based ae.c module.
- *
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
+/* Select()-based ae.c module. */
 
+/**
+ * Linux、Windows 操作系统的 IO 多路复用实现
+ */
 
 #include <sys/select.h>
 #include <string.h>
-
 typedef struct aeApiState {
     fd_set rfds, wfds;
-    /* We need to have a copy of the fd sets as it's not safe to reuse
-     * FD sets after select(). */
+    /* We need to have a copy of the fd sets as it's not safe to reuse FD sets after select(). */
     fd_set _rfds, _wfds;
 } aeApiState;
 
@@ -81,8 +54,16 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     memcpy(&state->_rfds,&state->rfds,sizeof(fd_set));
     memcpy(&state->_wfds,&state->wfds,sizeof(fd_set));
 
-    retval = select(eventLoop->maxfd+1,
-                &state->_rfds,&state->_wfds,NULL,tvp);
+    /*
+     * 调用操作系统API select() 等待内核返回监听描述符的事件产生, 该函数返回就绪描述符的数量, 5个参数含义依次是：
+     * 1. 是fd_set中最大的描述符+1, 当调用select函数时, 内核态会判断fd_set中描述符是否就绪, 此参数告诉内核最多判断到哪一个描述符;
+     * 2. 读描述符集合, 不监听传NULL
+     * 3. 写描述符集合, 不监听传NULL
+     * 4. 异常描述符集合, 不监听传NULL
+     * 5. 超时等待时间
+     */
+    retval = select(eventLoop->maxfd+1,&state->_rfds,&state->_wfds,NULL,tvp);
+
     if (retval > 0) {
         for (j = 0; j <= eventLoop->maxfd; j++) {
             int mask = 0;

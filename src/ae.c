@@ -1,33 +1,11 @@
 /* A simple event-driven programming library. Originally I wrote this code
  * for the Jim's event-loop (Jim is a Tcl interpreter) but later translated
  * it in form of a library for easy reuse.
- *
- * Copyright (c) 2006-2010, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/**
+ * Redis的网络框架实现了Reactor模型, 并以此开发事件驱动框架.
+ * 该框架的代码实现是 ae.c, 对应的头文件是 ae.h
  */
 
 #include <stdio.h>
@@ -63,13 +41,16 @@
 aeEventLoop *aeCreateEventLoop(int setsize) {
     aeEventLoop *eventLoop;
     int i;
-
+    // 为aeEventLoop分配内存空间
     if ((eventLoop = zmalloc(sizeof(*eventLoop))) == NULL) goto err;
+    // 最多支持的事件数量
     eventLoop->events = zmalloc(sizeof(aeFileEvent)*setsize);
     eventLoop->fired = zmalloc(sizeof(aeFiredEvent)*setsize);
+    // 为成员变量赋值
     if (eventLoop->events == NULL || eventLoop->fired == NULL) goto err;
     eventLoop->setsize = setsize;
     eventLoop->lastTime = time(NULL);
+    // 设置时间事件的链表头为NULL
     eventLoop->timeEventHead = NULL;
     eventLoop->timeEventNextId = 0;
     eventLoop->stop = 0;
@@ -77,13 +58,14 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     eventLoop->beforesleep = NULL;
     eventLoop->aftersleep = NULL;
     eventLoop->flags = 0;
+    // aeApiCreate 函数封装了操作系统提供的 IO 多路复用函数, 如果是Linux系统使用epoll, 对应文件为：ae_epoll.c
+    // 如果是windows系统使用select, 对应文件为：ae_select.c.
     if (aeApiCreate(eventLoop) == -1) goto err;
-    /* Events with mask == AE_NONE are not set. So let's initialize the
-     * vector with it. */
+    // 将所有网络IO事件对应文件描述符的掩码设置为AE_NONE, 表示暂时不对任何事件进行监听.
     for (i = 0; i < setsize; i++)
         eventLoop->events[i].mask = AE_NONE;
     return eventLoop;
-
+// 如果初始化失败, 执行的异常处理逻辑
 err:
     if (eventLoop) {
         zfree(eventLoop->events);
@@ -150,15 +132,31 @@ void aeStop(aeEventLoop *eventLoop) {
     eventLoop->stop = 1;
 }
 
-int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
-        aeFileProc *proc, void *clientData)
+/**
+ * Redis 启动后, 服务器程序的 main 函数会调用 initSever 函数来进行初始化, 而在初始化的过程中,
+ * aeCreateFileEvent 就会被 initServer 函数调用, 用于注册要监听的事件, 以及相应的事件处理函数.
+ *
+ * @param eventLoop 事件循环流程结构体
+ * @param fd IO 事件对应的文件描述符 fd
+ * @param mask 事件类型掩码 mask
+ * @param proc 事件处理回调函数*proc
+ * @param clientData 事件私有数据*clientData
+ * @return
+ */
+int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask, aeFileProc *proc, void *clientData)
 {
     if (fd >= eventLoop->setsize) {
         errno = ERANGE;
         return AE_ERR;
     }
+
+    // 根据传入的文件描述符 fd, 在 eventLoop 的 IO 事件数组中, 获取该描述符关联的 IO 事件指针变量*fe
     aeFileEvent *fe = &eventLoop->events[fd];
 
+    /*
+     * 增加监听事件, 本质上还是需要调用操作系统API来实现.
+     * 不同的操作系统运行redis, 会有不同 aeApiAddEvent() 实现.
+     */
     if (aeApiAddEvent(eventLoop, fd, mask) == -1)
         return AE_ERR;
     fe->mask |= mask;
@@ -222,22 +220,37 @@ static void aeAddMillisecondsToNow(long long milliseconds, long *sec, long *ms) 
     *ms = when_ms;
 }
 
+/**
+ * 创建时间事件: aeTimeEvent
+ *
+ * @param eventLoop 事件循环驱动变量
+ * @param milliseconds 要创建的这个时间事件的触发时间距离当前时间的时长, 用毫秒表示
+ * @param proc 要创建的时间事件触发后的回调函数: serverCron(server.c文件)
+ * @param clientData
+ * @param finalizerProc
+ * @return
+ */
 long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
         aeTimeProc *proc, void *clientData,
         aeEventFinalizerProc *finalizerProc)
 {
     long long id = eventLoop->timeEventNextId++;
+
+    // 时间事件变量te
     aeTimeEvent *te;
 
+    // 初始化时间事件te
     te = zmalloc(sizeof(*te));
     if (te == NULL) return AE_ERR;
     te->id = id;
+    // 调用 aeAddMillisecondsToNow 函, 根据传入的 milliseconds 参数, 计算所创建时间事件具体的触发时间戳, 并赋值给 te.
     aeAddMillisecondsToNow(milliseconds,&te->when_sec,&te->when_ms);
     te->timeProc = proc;
     te->finalizerProc = finalizerProc;
     te->clientData = clientData;
     te->prev = NULL;
     te->next = eventLoop->timeEventHead;
+    // 将新建的时间事件te插入到框架循环流程结构体 eventLoop 中的时间事件链表中.
     if (te->next)
         te->next->prev = te;
     eventLoop->timeEventHead = te;
@@ -283,7 +296,13 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
     return nearest;
 }
 
-/* Process time events */
+/**
+ * 执行时间事件, 基本流程就是从时间事件链表上逐一取出每一个事件, 然后根据当前时间判断该事件的触发时间戳是否已满足.
+ * 如果已满足, 那么就调用该事件对应的回调函数进行处理.
+ *
+ * @param eventLoop
+ * @return
+ */
 static int processTimeEvents(aeEventLoop *eventLoop) {
     int processed = 0;
     aeTimeEvent *te;
@@ -307,6 +326,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
     }
     eventLoop->lastTime = now;
 
+    // 从时间事件链表中取出事件
     te = eventLoop->timeEventHead;
     maxId = eventLoop->timeEventNextId-1;
     while(te) {
@@ -338,13 +358,14 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             te = te->next;
             continue;
         }
+        // 获取当前时间
         aeGetTime(&now_sec, &now_ms);
-        if (now_sec > te->when_sec ||
-            (now_sec == te->when_sec && now_ms >= te->when_ms))
-        {
+        // 如果当前时间已经满足当前事件的触发时间戳
+        if (now_sec > te->when_sec || (now_sec == te->when_sec && now_ms >= te->when_ms)) {
             int retval;
 
             id = te->id;
+            // 调用注册的回调函数处理
             retval = te->timeProc(eventLoop, id, te->clientData);
             processed++;
             if (retval != AE_NOMORE) {
@@ -372,19 +393,25 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
  * if flags has AE_CALL_AFTER_SLEEP set, the aftersleep callback is called.
  *
  * The function returns the number of events processed. */
+/**
+ *
+ * @param eventLoop
+ * @param flags
+ * @return 返回待处理的事件个数
+ */
 int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 {
     int processed = 0, numevents;
 
-    /* Nothing to do? return ASAP */
+    // 没有事件处理, 立刻返回
     if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
 
     /* Note that we want call select() even if there are no
      * file events to process as long as we want to process time
      * events, in order to sleep until the next time event is ready
      * to fire. */
-    if (eventLoop->maxfd != -1 ||
-        ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
+    // 有IO事件发生, 或者紧急的时间事件发生, 则开始处理
+    if (eventLoop->maxfd != -1 || ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
         int j;
         aeTimeEvent *shortest = NULL;
         struct timeval tv, *tvp;
@@ -397,11 +424,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             aeGetTime(&now_sec, &now_ms);
             tvp = &tv;
 
-            /* How many milliseconds we need to wait for the next
-             * time event to fire? */
-            long long ms =
-                (shortest->when_sec - now_sec)*1000 +
-                shortest->when_ms - now_ms;
+            // 等待多少毫秒才能触发下一次事件
+            long long ms = (shortest->when_sec - now_sec)*1000 + shortest->when_ms - now_ms;
 
             if (ms > 0) {
                 tvp->tv_sec = ms/1000;
@@ -428,8 +452,14 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             tvp = &tv;
         }
 
-        /* Call the multiplexing API, will return only on timeout or when
-         * some event fires. */
+        /*
+         * aeApiPoll函数会调用多路复用Api, 它仅会在超时或者有事件触发时返回.
+         * Redis 依赖于操作系统底层提供的 IO 多路复用机制, 以实现事件监听和捕获, 因此它需要适配不同的操作系统. 对此它进行了统一的封装:
+         * 1. ae_epoll.c,  对应 Linux 上的IO复用函数 epoll()
+         * 2. ae_evport.c, 对应 Solaris 上的 IO 复用函数 evport()
+         * 3. ae_kqueue.c, 对应 macOS 或 FreeBSD 上的 IO 复用函数 kqueue()
+         * 4. ae_select.c, 对应 Linux（或 Windows）的 IO 复用函数 select()
+         */
         numevents = aeApiPoll(eventLoop, tvp);
 
         /* After sleep callback. */
@@ -461,13 +491,14 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
              *
              * Fire the readable event if the call sequence is not
              * inverted. */
+            // 如果触发的是可读事件, 调用事件注册时设置的读事件回调处理函数(即readQueryFromClient)
             if (!invert && fe->mask & mask & AE_READABLE) {
                 fe->rfileProc(eventLoop,fd,fe->clientData,mask);
                 fired++;
                 fe = &eventLoop->events[fd]; /* Refresh in case of resize. */
             }
 
-            /* Fire the writable event. */
+            // //如果触发的是可写事件, 调用事件注册时设置的写事件回调处理函数(即sendReplyToClient)
             if (fe->mask & mask & AE_WRITABLE) {
                 if (!fired || fe->wfileProc != fe->rfileProc) {
                     fe->wfileProc(eventLoop,fd,fe->clientData,mask);
@@ -490,7 +521,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             processed++;
         }
     }
-    /* Check time events */
+    // 检查是否有时间事件, 若有则调用processTimeEvents函数处理
     if (flags & AE_TIME_EVENTS)
         processed += processTimeEvents(eventLoop);
 
@@ -524,10 +555,14 @@ int aeWait(int fd, int mask, long long milliseconds) {
  * @param eventLoop 事件循环指针
  */
 void aeMain(aeEventLoop *eventLoop) {
+    // redis事件驱动框架的主循环, 再未被停止的时候, 会一直循环监听事件.
     eventLoop->stop = 0;
     while (!eventLoop->stop) {
+        // 每次处理I/O事件之前, 调用 beforeSleep 函数, 进行一些任务处理.
+        // 比如调用 handleClientsWithPendingWrites 函数(在networking.c), 它会将 Redis sever 客户端缓冲区中的数据写回客户端.
         if (eventLoop->beforesleep != NULL)
             eventLoop->beforesleep(eventLoop);
+        // 事件捕获与分发
         aeProcessEvents(eventLoop, AE_ALL_EVENTS|AE_CALL_AFTER_SLEEP);
     }
 }

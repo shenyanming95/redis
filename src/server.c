@@ -1,32 +1,3 @@
-/*
- * Copyright (c) 2009-2016, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 #include "cluster.h"
 #include "slowlog.h"
@@ -1841,7 +1812,10 @@ void checkChildrenDone(void) {
  * so in order to throttle execution of things we want to do less frequently
  * a macro is used: run_with_period(milliseconds) { .... }
  */
-
+// 时间事件触发时的回调函数(aeCreateTimeEvent -> aeTimeEvent) 这个函数做两件事：
+// 1. 顺序调用一些函, 来实现时间事件被触发后, 执行一些后台任务, 比如调用 databaseCron 函数, 处理过期 key 或进行 rehash 等.
+// 2. 以不同的频率周期性执行一些任务, 通过执行宏 run_with_period 来实现的.
+//    (该宏定义会根据 Redis 实例配置文件 redis.conf 中定义的 hz 值, 来判断参数 _ms_ 表示的时间戳是否到达. 一旦到达, serverCron 就可以执行相应的任务了)
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     int j;
     UNUSED(eventLoop);
@@ -1925,6 +1899,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* We received a SIGTERM, shutting down here in a safe way, as it is
      * not ok doing so inside the signal handler. */
+    // 如果收到进程结束信号, 则执行server关闭操作
     if (server.shutdown_asap) {
         if (prepareForShutdown(SHUTDOWN_NOFLAGS) == C_OK) exit(0);
         serverLog(LL_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
@@ -1957,10 +1932,10 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
     }
 
-    /* We need to do a few operations on clients asynchronously. */
+    // 执行客户端的异步操作
     clientsCron();
 
-    /* Handle background operations on Redis databases. */
+    // 执行数据库的后台操作
     databasesCron();
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
@@ -2025,6 +2000,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * clear the AOF error in case of success to make the DB writable again,
      * however to try every second is enough in case of 'hz' is set to
      * an higher frequency. */
+    // 每1秒执行1次, 检查AOF是否有写错误
     run_with_period(1000) {
         if (server.aof_last_write_status == C_ERR)
             flushAppendOnlyFile(0);
@@ -2741,7 +2717,10 @@ void initServer(void) {
     createSharedObjects();
     adjustOpenFilesLimit();
 
-    // 创建事件循环框架
+    // 创建事件循环框架, 调用aeCreateEventLoop函数创建aeEventLoop结构体, 由server结构的el属性保存.
+    // 参数 setSize 等于 server 结构的 maxclients 变量和宏定义 CONFIG_FDSET_INCR 累加而得.
+    // 其中, maxclients 变量的值大小, 可以在配置文件 redis.conf 中进行定义, 默认值是 1000.
+    // 而宏定义 CONFIG_FDSET_INCR 的大小, 等于宏定义 CONFIG_MIN_RESERVED_FDS 的值再加上 96 (和为128)
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
@@ -2845,7 +2824,7 @@ void initServer(void) {
         exit(1);
     }
 
-    /* 监听每个ip可能发生的客户端连接, 创建监听事件同时指定处理函数acceptTcpHandler() */
+    // 监听每个ip可能发生的客户端连接, 创建监听AE_READABLE事件(即客户端的网络连接事件)同时指定处理函数acceptTcpHandler()
     for (j = 0; j < server.ipfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
             acceptTcpHandler,NULL) == AE_ERR)

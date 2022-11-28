@@ -1,38 +1,15 @@
-/* Linux epoll(2) based ae.c module
- *
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
+/* Linux epoll(2) based ae.c module */
 
+/**
+ * Linux 操作系统的 IO 多路复用实现
+ */
 
 #include <sys/epoll.h>
 
 typedef struct aeApiState {
+    // epoll实例的描述符
     int epfd;
+    // epoll_event结构体数组，记录监听事件
     struct epoll_event *events;
 } aeApiState;
 
@@ -40,17 +17,20 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     aeApiState *state = zmalloc(sizeof(aeApiState));
 
     if (!state) return -1;
+    // 将epoll_event数组保存在aeApiState结构体变量state中
     state->events = zmalloc(sizeof(struct epoll_event)*eventLoop->setsize);
     if (!state->events) {
         zfree(state);
         return -1;
     }
+    // 将epoll实例描述符保存在 aeApiState 结构体变量state中
     state->epfd = epoll_create(1024); /* 1024 is just a hint for the kernel */
     if (state->epfd == -1) {
         zfree(state->events);
         zfree(state);
         return -1;
     }
+    // 存储 aeApiState 结构体
     eventLoop->apidata = state;
     return 0;
 }
@@ -70,19 +50,33 @@ static void aeApiFree(aeEventLoop *eventLoop) {
     zfree(state);
 }
 
+/**
+ * aeCreateFileEvent函数会调用 aeApiAddEvent函数注册事件,
+ * 然后 aeApiAddEvent 再通过调用 epoll_ctl 来注册希望监听的事件和相应的处理函数.
+ * 一旦 aeProceeEvents 函数捕获到实际事件时, 它就会调用注册的函数对事件进行处理.
+ *
+ * @param eventLoop
+ * @param fd
+ * @param mask
+ * @return
+ */
 static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
+    // 从eventLoop结构体中获取aeApiState变量, 里面保存了epoll实例
     aeApiState *state = eventLoop->apidata;
+    // 创建epoll_event类型变量
     struct epoll_event ee = {0}; /* avoid valgrind warning */
-    /* If the fd was already monitored for some event, we need a MOD
-     * operation. Otherwise we need an ADD operation. */
+    // 如果文件描述符fd对应的IO事件已存在, 则操作类型为修改, 否则为添加
     int op = eventLoop->events[fd].mask == AE_NONE ?
             EPOLL_CTL_ADD : EPOLL_CTL_MOD;
 
     ee.events = 0;
     mask |= eventLoop->events[fd].mask; /* Merge old events */
+    // 将可读或可写IO事件类型转换为epoll监听的类型EPOLLIN(可读)或EPOLLOUT(可写)
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;
+    //将要监听的文件描述符赋值给ee
     ee.data.fd = fd;
+    // Linux 提供了 epoll_ctl API, 用于增加新的观察事件.
     if (epoll_ctl(state->epfd,op,fd,&ee) == -1) return -1;
     return 0;
 }
@@ -105,16 +99,32 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
     }
 }
 
+/**
+ * Linux 提供了 epoll_wait API, 用于检测内核中发生的网络 IO 事件,
+ * 此函数 aeApiPoll() 封装了对 epoll_wait 的调用.
+ *
+ * @param eventLoop
+ * @param tvp
+ * @return
+ */
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     int retval, numevents = 0;
 
-    retval = epoll_wait(state->epfd,state->events,eventLoop->setsize,
-            tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
+    /*
+     * 调用操作系统API epoll_wait() 等待内核返回监听描述符的事件产生, 该函数返回已经就绪的事件的数量. 四个参数的含义依次是:
+     * 1. 为epoll_create()返回的epoll实例描述符;
+     * 2. epoll_await() 要返回的已经产生的事件集合;
+     * 3. 系统返回的最大事件数量;
+     * 4. 超时时间
+     */
+    retval = epoll_wait(state->epfd, state->events, eventLoop->setsize, tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
     if (retval > 0) {
         int j;
 
+        // 监听到的事件数量
         numevents = retval;
+        // 循环处理每一个事件.
         for (j = 0; j < numevents; j++) {
             int mask = 0;
             struct epoll_event *e = state->events+j;

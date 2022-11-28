@@ -1,32 +1,3 @@
-/*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 #include "atomicvar.h"
 #include <sys/socket.h>
@@ -97,6 +68,7 @@ client *createClient(connection *conn) {
         connEnableTcpNoDelay(conn);
         if (server.tcpkeepalive)
             connKeepAlive(conn,server.tcpkeepalive);
+        // 为创建的客户端设置I/O读取的回调函数
         connSetReadHandler(conn, readQueryFromClient);
         connSetPrivateData(conn, c);
     }
@@ -941,6 +913,13 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip) {
     }
 }
 
+/**
+ * 接受客户端连接, 创建已连接套接字 cfd
+ * @param el
+ * @param fd
+ * @param privdata
+ * @param mask
+ */
 void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     int cport, cfd, max = MAX_ACCEPTS_PER_CALL;
     char cip[NET_IP_STR_LEN];
@@ -949,6 +928,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(privdata);
 
     while(max--) {
+        // 获取到客户端的连接
         cfd = anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
         if (cfd == ANET_ERR) {
             if (errno != EWOULDBLOCK)
@@ -957,6 +937,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
         serverLog(LL_VERBOSE,"Accepted %s:%d", cip, cport);
+        // 将已连接套接字 cfd 作为参数传递给 acceptCommonHandler函数, 以创建客户端.
         acceptCommonHandler(connCreateAcceptedSocket(cfd),0,cip);
     }
 }
@@ -1364,11 +1345,13 @@ void sendReplyToClient(connection *conn) {
  * we can just write the replies to the client output buffer without any
  * need to use a syscall in order to install the writable event handler,
  * get it called, and so forth. */
+// 遍历每一个待写回数据的客户端, 然后调用 writeToClient 函数, 将客户端输出缓冲区中的数据写回.
 int handleClientsWithPendingWrites(void) {
     listIter li;
     listNode *ln;
     int processed = listLength(server.clients_pending_write);
 
+    // 遍历每一个待写回的客户端
     listRewind(server.clients_pending_write,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -1380,10 +1363,12 @@ int handleClientsWithPendingWrites(void) {
         if (c->flags & CLIENT_PROTECTED) continue;
 
         /* Try to write buffers to the client socket. */
+        // 调用writeToClient将当前客户端的输出缓冲区数据写回
         if (writeToClient(c,0) == C_ERR) continue;
 
         /* If after the synchronous writes above we still have data to
          * output to the client, we need to install the writable handler. */
+        // 如果还有待写回数据
         if (clientHasPendingReplies(c)) {
             int ae_barrier = 0;
             /* For the fsync=always policy, we want that a given FD is never
@@ -1391,9 +1376,7 @@ int handleClientsWithPendingWrites(void) {
              * so that in the middle of receiving the query, and serving it
              * to the client, we'll call beforeSleep() that will do the
              * actual fsync of AOF to disk. the write barrier ensures that. */
-            if (server.aof_state == AOF_ON &&
-                server.aof_fsync == AOF_FSYNC_ALWAYS)
-            {
+            if (server.aof_state == AOF_ON && server.aof_fsync == AOF_FSYNC_ALWAYS) {
                 ae_barrier = 1;
             }
             if (connSetWriteHandlerWithBarrier(c->conn, sendReplyToClient, ae_barrier) == C_ERR) {
@@ -1855,6 +1838,11 @@ void processInputBuffer(client *c) {
     }
 }
 
+/**
+ * 执行客户端的请求
+ *
+ * @param conn
+ */
 void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     int nread, readlen;

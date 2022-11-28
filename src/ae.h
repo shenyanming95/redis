@@ -1,33 +1,11 @@
 /* A simple event-driven programming library. Originally I wrote this code
  * for the Jim's event-loop (Jim is a Tcl interpreter) but later translated
  * it in form of a library for easy reuse.
- *
- * Copyright (c) 2006-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/**
+ * Redis的网络框架实现了Reactor模型, 并以此开发事件驱动框架.
+ * 该框架的代码实现是 ae.c, 对应的头文件是 ae.h
  */
 
 #ifndef __AE_H__
@@ -63,27 +41,82 @@ struct aeEventLoop;
 
 /* Types and data structures */
 typedef void aeFileProc(struct aeEventLoop *eventLoop, int fd, void *clientData, int mask);
+
 typedef int aeTimeProc(struct aeEventLoop *eventLoop, long long id, void *clientData);
+
 typedef void aeEventFinalizerProc(struct aeEventLoop *eventLoop, void *clientData);
+
 typedef void aeBeforeSleepProc(struct aeEventLoop *eventLoop);
 
-/* File event structure */
+/**
+ * Redis的事件驱动框架, 只定义了两类事件：
+ * 1. IO事件, 即{@link aeFileEvent}, 对应客户端发送的网络请求. 包括三类：可读、可写和屏障事件.
+ * 2. 时间事件, 即{@Link aeTimeEvent}, 对应Redis自身的周期性操作.
+ */
+
+/* I/O 事件结构体 */
 typedef struct aeFileEvent {
-    int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */
+    /**
+     * 用来表示事件类型的掩码, 主要有 AE_READABLE、AE_WRITABLE 和 AE_BARRIER 三种类型事件. 初始化为 AE_NONE, 表示没有任何事件. 其中：
+     * 1.AE_READABLE：可读事件, 从客户端读取数据;
+     * 2.AE_WRITABLE：可写事件, 向客户端写入数据;
+     * 3.AE_BARRIER：屏障事件, 反转事件的处理顺序. 比如一般redis优先给客户端返回数据, 但如果需要将server端数据写入磁盘, 就会使用屏障事件, 让写入优先于客户端返回事件执行.
+     */
+    int mask;
+
+    /**
+     * 这两个属性, 分别指向AE_READABLE 和 AE_WRITABLE 这两类事件的处理函数.
+     * 即 Reactor 模型中的 handle 角色.
+     */
     aeFileProc *rfileProc;
     aeFileProc *wfileProc;
+
+    /**
+     * 指向客户端私有数据的指针
+     */
     void *clientData;
 } aeFileEvent;
 
-/* Time event structure */
+/* 时间事件结构体 */
 typedef struct aeTimeEvent {
-    long long id; /* time event identifier. */
-    long when_sec; /* seconds */
-    long when_ms; /* milliseconds */
+    /**
+     * 时间事件ID
+     */
+    long long id;
+
+    /**
+     * 事件到达的秒级时间戳
+     */
+    long when_sec;
+
+    /**
+     * 事件到达的毫秒级时间戳
+     */
+    long when_ms;
+
+    /**
+     * 时间事件触发后的处理函数
+     */
     aeTimeProc *timeProc;
+
+    /**
+     * 事件结束后的处理函数
+     */
     aeEventFinalizerProc *finalizerProc;
+
+    /**
+     * 事件相关的私有数据
+     */
     void *clientData;
+
+    /**
+     * 时间事件链表的前向指针
+     */
     struct aeTimeEvent *prev;
+
+    /**
+     * 时间事件链表的后向指针
+     */
     struct aeTimeEvent *next;
 } aeTimeEvent;
 
@@ -93,42 +126,90 @@ typedef struct aeFiredEvent {
     int mask;
 } aeFiredEvent;
 
-/* State of an event based program */
+/**
+ * 事件驱动框架循环流程的数据结构.
+ * 会在 Redis server 在完成初始化后创建, 执行逻辑在：在server.c的 initServer 函数中,
+ * 通过调用 aeCreateEventLoop 函数进行初始化.
+ */
 typedef struct aeEventLoop {
     int maxfd;   /* highest file descriptor currently registered */
     int setsize; /* max number of file descriptors tracked */
     long long timeEventNextId;
     time_t lastTime;     /* Used to detect system clock skew */
-    aeFileEvent *events; /* Registered events */
-    aeFiredEvent *fired; /* Fired events */
-    aeTimeEvent *timeEventHead;
-    int stop;
-    void *apidata; /* This is used for polling API specific data */
-    aeBeforeSleepProc *beforesleep;
-    aeBeforeSleepProc *aftersleep;
+
+    aeFileEvent *events;        // 客户端 I/O 事件数组
+    aeFiredEvent *fired;        // 已触发事件数组
+    aeTimeEvent *timeEventHead; // 按一定时间周期触发的事件的链表头
+
+    int stop; // 停止循环事件的标记符
+    void *apidata;  // 用于存储底层操作系统实现I/O多路复用的os-api变量, 实际为各个实现源文件的aeApiState结构体.
+    aeBeforeSleepProc *beforesleep; // 进入事件循环流程前执行的函数
+    aeBeforeSleepProc *aftersleep;  // 退出事件循环流程后执行的函数
     int flags;
 } aeEventLoop;
 
 /* Prototypes */
 aeEventLoop *aeCreateEventLoop(int setsize);
+
 void aeDeleteEventLoop(aeEventLoop *eventLoop);
+
 void aeStop(aeEventLoop *eventLoop);
-int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
-        aeFileProc *proc, void *clientData);
+
+/**
+ * 负责事件和 handler 注册的函数
+ *
+ * @param eventLoop 事件循环流程结构体
+ * @param fd IO 事件对应的文件描述符 fd
+ * @param mask 事件类型掩码 mask
+ * @param proc 事件处理回调函数*proc
+ * @param clientData 事件私有数据*clientData
+ * @return
+ */
+int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask, aeFileProc *proc, void *clientData);
+
 void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask);
+
 int aeGetFileEvents(aeEventLoop *eventLoop, int fd);
+
+/**
+ * 创建时间事件: aeTimeEvent
+ *
+ * @param eventLoop 事件循环驱动变量
+ * @param milliseconds 要创建的这个时间事件的触发时间距离当前时间的时长, 用毫秒表示
+ * @param proc 要创建的时间事件触发后的回调函数: serverCron(server.c文件)
+ * @param clientData
+ * @param finalizerProc
+ * @return
+ */
 long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
-        aeTimeProc *proc, void *clientData,
-        aeEventFinalizerProc *finalizerProc);
+                            aeTimeProc *proc, void *clientData,
+                            aeEventFinalizerProc *finalizerProc);
+
 int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id);
+
+/**
+ * 负责事件捕获与分发的函数
+ */
 int aeProcessEvents(aeEventLoop *eventLoop, int flags);
+
 int aeWait(int fd, int mask, long long milliseconds);
+
+/**
+ * Redis事件驱动框架的入口函数
+ * @param eventLoop
+ */
 void aeMain(aeEventLoop *eventLoop);
+
 char *aeGetApiName(void);
+
 void aeSetBeforeSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *beforesleep);
+
 void aeSetAfterSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *aftersleep);
+
 int aeGetSetSize(aeEventLoop *eventLoop);
+
 int aeResizeSetSize(aeEventLoop *eventLoop, int setsize);
+
 void aeSetDontWait(aeEventLoop *eventLoop, int noWait);
 
 #endif
