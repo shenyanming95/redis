@@ -2888,7 +2888,13 @@ void initServer(void) {
  * Specifically, creation of threads due to a race bug in ld.so, in which
  * Thread Local Storage initialization collides with dlopen call.
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
+/**
+ * 服务器初始化的一些步骤需要最后完成(在模块加载之后).
+ * 具体来说, 由于 ld.so 中的竞争错误导致线程创建, 其中线程本地存储初始化与 dlopen 调用发生冲突.
+ * 内部调用 bioInit 函数, 来创建后台线程.
+ */
 void InitServerLast() {
+    // bioInit()函数在bio.c文件中实现, 它的主要作用调用 pthread_create 函数创建多个后台线程.
     bioInit();
     initThreadedIO();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
@@ -4567,15 +4573,31 @@ void createPidFile(void) {
     }
 }
 
+/**
+ * 当我们从 Shell 命令行启动 redis 时, 由于 Shell 本身就是一个进程, 因此它会调用 fork() 创建一个子进程,
+ * 由这个子进程来运行 redis 的可执行文件. 子进程会从父进程继承相应的标准输入和输出, 所以 redis 日志才可以
+ * 在 shell 命令行接口输出, 并且我们关闭了 shell 命令行窗口, redis 也随之关闭.
+ *
+ * 不过我们可以通过配置改变 redis 的启动方式, 让它守护进程的方式在后台运行, 独立于 shell 终端,
+ * 不再需要用户在 shell 中进行输入了. 此函数就是启动守护进程的实现.
+ */
 void daemonize(void) {
     int fd;
 
-    if (fork() != 0) exit(0); /* parent exits */
-    setsid(); /* create a new session */
+    /*
+     * 这边会调用 fork() 函数创建子进程. fork() 函数的返回值有不同含义:
+     * 1) <0, 表示 fork() 执行出错;
+     * 2) =0, 表示fork函数返回以后的代码分支就会在子进程中运行;
+     * 3) >0, 表示fork函数返回以后的代码分支仍会在父进程中运行;
+     */
+    if (fork() != 0) exit(0); /* 如果子进程成功创建并能正常运行, 关闭父进程 */
+    // 设置新会话
+    setsid();
 
-    /* Every output goes to /dev/null. If Redis is daemonized but
-     * the 'logfile' is set to 'stdout' in the configuration file
-     * it will not log at all. */
+    /*
+     * 子进程会用 open 函数打开 /dev/null 设备, 把它的标准输入、标准输出和标准错误输出,
+     * 重新定向到 /dev/null 设备, 后续守护进程就不可以不依赖 Shell 进程进行日志输入输出了.
+     */
     if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
         dup2(fd, STDIN_FILENO);
         dup2(fd, STDOUT_FILENO);
@@ -4895,7 +4917,12 @@ int iAmMaster(void) {
 }
 
 /**
- * redis实例启动的入口点
+ * redis实例启动的入口点.
+ *
+ * 对于 redis 来说, 它的主要工作, 包括接收客户端请求、解析请求和进行数据读写等操作,
+ * 都没有创建新线程来执行. 所以, Redis 主要工作的确是由单线程来执行的, 这也是我们常说 Redis 是单线程程序的原因.
+ * 但是新版本的 redis, 除了主 IO 线程外, 还会启动一些后台线程来处理部分任务, 从而避免这些任务对主 IO 线程的影响,
+ * 这些后台线程在 bio.c 中启动
  */
 int main(int argc, char **argv) {
     struct timeval tv;
@@ -5057,6 +5084,7 @@ int main(int argc, char **argv) {
     }
 
     server.supervised = redisIsSupervised(server.supervised_mode);
+    // 根据配置, 判断是否要将 redis 转为守护（后台）进程允许
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
@@ -5077,6 +5105,7 @@ int main(int argc, char **argv) {
     #endif
         moduleLoadFromQueue();
         ACLLoadUsersAtStartup();
+        // InitServerLast() 内部会调用 bioInit() 函数来创建后台线程
         InitServerLast();
         loadDataFromDisk();
         if (server.cluster_enabled) {
@@ -5100,6 +5129,7 @@ int main(int argc, char **argv) {
             }
         }
     } else {
+        // InitServerLast() 内部会调用 bioInit() 函数来创建后台线程
         InitServerLast();
         sentinelIsRunning();
     }
