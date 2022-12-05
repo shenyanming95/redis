@@ -143,8 +143,8 @@ typedef struct aeEventLoop {
 
     int stop; // 停止循环事件的标记符
     void *apidata;  // 用于存储底层操作系统实现I/O多路复用的os-api变量, 实际为各个实现源文件的aeApiState结构体.
-    aeBeforeSleepProc *beforesleep; // 进入事件循环流程前执行的函数
-    aeBeforeSleepProc *aftersleep;  // 退出事件循环流程后执行的函数
+    aeBeforeSleepProc *beforesleep; // 进入事件循环流程前执行的函数, 即 server.c 中的 beforeSleep() 函数.
+    aeBeforeSleepProc *aftersleep;  // 退出事件循环流程后执行的函数, 即 server.c 中的 afterSleep() 函数.
     int flags;
 } aeEventLoop;
 

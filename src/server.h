@@ -1053,8 +1053,16 @@ struct redisServer {
     int cfd_count;              /* Used slots in cfd[] */
     list *clients;              /* List of active clients */
     list *clients_to_close;     /* Clients to close asynchronously */
+
+    /**
+     * redis在接收到客户端请求和返回给客户端数据的过程中, 会根据条件, 推迟客户端的读写操作,
+     * 把待读写的客户端保存到这两个列表中. 接着, 每次进入事件循环前, 会再把列表中的客户端添加到
+     * io_threads_list 数组中(networking.c), 交给 IO 线程进行处理.
+     * 注：列表中存储的元素是：client
+     */
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
+
     list *slaves, *monitors;    /* List of slaves and MONITORs */
     client *current_client;     /* Current client executing the command. */
     rax *clients_timeout_table; /* Radix tree for blocked clients timeouts. */

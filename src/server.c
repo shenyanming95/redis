@@ -2066,7 +2066,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     /* Handle precise timeouts of blocked clients. */
     handleBlockedClientsTimeout();
 
-    /* We should handle pending reads clients ASAP after event loop. */
+    // 待读客户端分配给 IO 线程执行
     handleClientsWithPendingReadsUsingThreads();
 
     /* Handle TLS pending data. (must be done before flushAppendOnlyFile) */
@@ -2124,7 +2124,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     /* Write the AOF buffer on disk */
     flushAppendOnlyFile(0);
 
-    /* Handle writes with pending output buffers. */
+    // 待读客户端分配给 IO 线程执行
     handleClientsWithPendingWritesUsingThreads();
 
     /* Close clients that need to be closed asynchronous */
@@ -2896,6 +2896,7 @@ void initServer(void) {
 void InitServerLast() {
     // bioInit()函数在bio.c文件中实现, 它的主要作用调用 pthread_create 函数创建多个后台线程.
     bioInit();
+    // redis 6.0 退出的多I/O线程机制, 这个函数就是用来初始化 I/O 线程的. 在 networking.c 文件中实现
     initThreadedIO();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
     server.initial_memory_usage = zmalloc_used_memory();
