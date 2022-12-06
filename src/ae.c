@@ -491,7 +491,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
              *
              * Fire the readable event if the call sequence is not
              * inverted. */
-            // 如果触发的是可读事件, 调用事件注册时设置的读事件回调处理函数(即readQueryFromClient)
+            // 如果触发的是可读事件, 调用事件注册时设置的读事件回调处理函数
+            // 即 readQueryFromClient, 在 networking.c 文件的 createClient() 函数中设置.
             if (!invert && fe->mask & mask & AE_READABLE) {
                 fe->rfileProc(eventLoop,fd,fe->clientData,mask);
                 fired++;

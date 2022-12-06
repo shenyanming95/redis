@@ -149,7 +149,7 @@ volatile unsigned long lru_clock; /* Server global current LRU time. */
  *    specific data structures, such as: DEL, RENAME, MOVE, SELECT,
  *    TYPE, EXPIRE*, PEXPIRE*, TTL, PTTL, ...
  */
-
+// redis所有的命令
 struct redisCommand redisCommandTable[] = {
     {"module",moduleCommand,-2,
      "admin no-script",
@@ -2357,6 +2357,8 @@ void initServerConfig(void) {
      * redis.conf using the rename-command directive. */
     server.commands = dictCreate(&commandTableDictType,NULL);
     server.orig_commands = dictCreate(&commandTableDictType,NULL);
+    // 调用 populateCommandTable() 函数, 将 Redis 提供的命令名称和对应的实现函数, 插入到上面刚创建好哈希表：commands
+    // 内部是将定义好的redis命令数组: redisCommandTable, 加入到哈希表中.
     populateCommandTable();
     server.delCommand = lookupCommandByCString("del");
     server.multiCommand = lookupCommandByCString("multi");
@@ -3354,12 +3356,14 @@ void call(client *c, int flags) {
  * other operations can be performed by the caller. Otherwise
  * if C_ERR is returned the client was destroyed (i.e. after QUIT). */
 int processCommand(client *c) {
+    // 将客户端的命令请求, 替换成 module 中想要替换的命令.
     moduleCallCommandFilters(c);
 
     /* The QUIT command is handled separately. Normal command procs will
      * go through checking for replication and QUIT will cause trouble
      * when FORCE_REPLICATION is enabled and would be implemented in
      * a regular command proc. */
+    // 如果当前命令为 "quit" 命令
     if (!strcasecmp(c->argv[0]->ptr,"quit")) {
         addReply(c,shared.ok);
         c->flags |= CLIENT_CLOSE_AFTER_REPLY;
@@ -3368,6 +3372,7 @@ int processCommand(client *c) {
 
     /* Now lookup the command and check ASAP about trivial error conditions
      * such as wrong arity, bad command name and so forth. */
+    // 在全局变量 server 的 commands 成员变量中查找相关的命令
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
     if (!c->cmd) {
         flagTransaction(c);
@@ -3586,14 +3591,16 @@ int processCommand(client *c) {
         return C_OK;
     }
 
-    /* Exec the command */
+    // 客户端有CLIENT_MULTI标记, 并且当前不是exec、discard、multi和watch命令
     if (c->flags & CLIENT_MULTI &&
         c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
         c->cmd->proc != multiCommand && c->cmd->proc != watchCommand)
     {
+        // 将命令入队保存, 等待后续一起处理
         queueMultiCommand(c);
         addReply(c,shared.queued);
     } else {
+        // 调用call函数执行命令
         call(c,CMD_CALL_FULL);
         c->woff = server.master_repl_offset;
         if (listLength(server.ready_keys))

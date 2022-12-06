@@ -922,7 +922,7 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip) {
 }
 
 /**
- * 接受客户端连接, 创建已连接套接字 cfd
+ * 接收客户端连接, 创建已连接套接字 cfd
  * @param el
  * @param fd
  * @param privdata
@@ -1748,6 +1748,7 @@ void commandProcessed(client *c) {
 int processCommandAndResetClient(client *c) {
     int deadclient = 0;
     server.current_client = c;
+    // 执行命令
     if (processCommand(c) == C_OK) {
         commandProcessed(c);
     }
@@ -1763,6 +1764,7 @@ int processCommandAndResetClient(client *c) {
  * more query buffer to process, because we read more data from the socket
  * or because a client was blocked and later reactivated, so there could be
  * pending query buffer, already representing a full command, to process. */
+// 解析客户端发来的命令
 void processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while(c->qb_pos < sdslen(c->querybuf)) {
@@ -1789,7 +1791,12 @@ void processInputBuffer(client *c) {
          * The same applies for clients we want to terminate ASAP. */
         if (c->flags & (CLIENT_CLOSE_AFTER_REPLY|CLIENT_CLOSE_ASAP)) break;
 
-        /* Determine request type when unknown. */
+        /*
+         * 确定客户端的请求类型:
+         * 1) 若命令是以"*"开头, 则是 PROTO_REQ_MULTIBULK 类型命令, 符合 RESP 协议（Redis 客户端与服务器端的标准通信协议）的请求.
+         * 2) 若命令不以"*"开头, 则是 PROTO_REQ_INLINE 类型命令, 这类命令被称为管道命令, 命令和命令之间是使用换行符“\r\n”分隔开来的.
+         * 不同类型的命令会有不同的函数来解析：processMultibulkBuffer、processInlineBuffer.
+         */
         if (!c->reqtype) {
             if (c->querybuf[c->qb_pos] == '*') {
                 c->reqtype = PROTO_REQ_MULTIBULK;
@@ -1799,6 +1806,7 @@ void processInputBuffer(client *c) {
         }
 
         if (c->reqtype == PROTO_REQ_INLINE) {
+            // 如果是 PROTO_REQ_INLINE 类型的命令, 调用 processInlineBuffer() 函数解析.
             if (processInlineBuffer(c) != C_OK) break;
             /* If the Gopher mode and we got zero or one argument, process
              * the request in Gopher mode. */
@@ -1812,6 +1820,7 @@ void processInputBuffer(client *c) {
                 break;
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+            // 如果是 PROTO_REQ_MULTIBULK 类型的命令, 调用 processMultibulkBuffer() 函数解析.
             if (processMultibulkBuffer(c) != C_OK) break;
         } else {
             serverPanic("Unknown request type");
@@ -1821,15 +1830,18 @@ void processInputBuffer(client *c) {
         if (c->argc == 0) {
             resetClient(c);
         } else {
-            /* If we are in the context of an I/O thread, we can't really
-             * execute the command here. All we can do is to flag the client
-             * as one that needs to process the command. */
+            /*
+             * 如果客户端有CLIENT_PENDING_READ标识, 说明它是由 I/O 线程响应并解析命令的,
+             * Redis 在这里将其标识为: CLIENT_PENDING_COMMAND, 变直接退出循环, 而不会继续调用 processCommandAndResetClient() 函数去执行命令.
+             * 这是为了让命令的执行全部交由主 I/O 线程来处理, 以保证原子性. 主 I/O 线程会在执行 handleClientsWithPendingReadsUsingThreads() 函数
+             * 判断客户端是否有 CLIENT_PENDING_COMMAND 标识, 有的话再调用 processCommandAndResetClient() 执行命令.
+             */
             if (c->flags & CLIENT_PENDING_READ) {
                 c->flags |= CLIENT_PENDING_COMMAND;
                 break;
             }
 
-            /* We are finally ready to execute the command. */
+            // 代码走到这里, 就可以开始执行命令.
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, we avoid exiting this
                  * loop and trimming the client buffer later. So we return
@@ -1847,7 +1859,11 @@ void processInputBuffer(client *c) {
 }
 
 /**
- * 执行客户端的请求
+ * 执行客户端的请求, 读取客户端发来的命令, 这是整个命令执行过程的起点. 整个链路为：
+ * 1) 命令读取, 执行 readQueryFromClient() 函数
+ * 2) 命令解析, 执行 processInputBufferAndReplicate() 函数
+ * 3) 命令执行, 执行 processCommandAndResetClient() 函数
+ * 4) 结果返回, 执行 addReply() 函数
  *
  * @param conn
  */
@@ -1862,7 +1878,9 @@ void readQueryFromClient(connection *conn) {
     // 判断是否推迟从客户端读取数据, 若是, 此方法返回
     if (postponeClientRead(c)) return;
 
+    // 从客户端socket中读取的数据长度, 默认为16KB
     readlen = PROTO_IOBUF_LEN;
+
     /* If this is a multi bulk request, and we are processing a bulk reply
      * that is large enough, try to maximize the probability that the query
      * buffer contains exactly the SDS string representing the object, even
@@ -1881,7 +1899,9 @@ void readQueryFromClient(connection *conn) {
 
     qblen = sdslen(c->querybuf);
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
+    // 为客户端的 querybuf 缓冲区分配空间
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
+    // 从客户端socket读取数据
     nread = connRead(c->conn, c->querybuf+qblen, readlen);
     if (nread == -1) {
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
@@ -1920,6 +1940,7 @@ void readQueryFromClient(connection *conn) {
 
     /* There is more data in the client input buffer, continue parsing it
      * in case to check if there is a full command to execute. */
+    // 解析命令
      processInputBuffer(c);
 }
 
@@ -3204,7 +3225,8 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     /*
      * 取出 server.clients_pending_read 中的客户端,
      * 依次判断客户端的标识中是否有 CLIENT_PENDING_COMMAND 标识,
-     * 若有说明该客户端中的命令已经被某一个 IO 线程解析过, 已经可以被执行.
+     * 若有说明该客户端中的命令已经被某一个 IO 线程解析过, 但是没被执行, 详见: processInputBuffer
+     * 所以需要主 I/O 线程处理此命令, 这也是就算 redis 6.0 开启多 I/O 线程但也能保证命令原子性的关键所在.
      */
     while(listLength(server.clients_pending_read)) {
         ln = listFirst(server.clients_pending_read);
