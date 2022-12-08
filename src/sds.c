@@ -1,33 +1,7 @@
-/* SDSLib 2.0 -- A C dynamic strings library
- *
- * Copyright (c) 2006-2015, Salvatore Sanfilippo <antirez at gmail dot com>
- * Copyright (c) 2015, Oran Agra
- * Copyright (c) 2015, Redis Labs, Inc
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+
+/**
+ * Redis专门设计了SDS数据结构, 在字符数组的基础上, 增加了字符数组长度
+ * 和分配空间大小等元数据
  */
 
 #include <stdio.h>
@@ -89,24 +63,29 @@ static inline char sdsReqType(size_t string_size) {
 sds sdsnewlen(const void *init, size_t initlen) {
     // 指向sds结构体的指针
     void *sh;
-    // 本质上就是char*数组
+    // 在redis中sds类型就是指：char*, 字符数组
     sds s;
-
+    // 判断要创建的sds类型
     char type = sdsReqType(initlen);
     /* Empty strings are usually created in order to append. Use type 8
      * since type 5 is not good at this. */
     if (type == SDS_TYPE_5 && initlen == 0) type = SDS_TYPE_8;
+    // 计算SDS结构体中元数据的长度, 将其存储到hdrlen
     int hdrlen = sdsHdrSize(type);
     unsigned char *fp; /* flags pointer. */
 
+    // 分配内存, 创建SDS结构, 需要的内存大小为：结构体头部大小 + 用户申请字符串的大小 + 字符数组截止符号'\0'
     sh = s_malloc(hdrlen+initlen+1);
     if (sh == NULL) return NULL;
     if (init==SDS_NOINIT)
         init = NULL;
     else if (!init)
         memset(sh, 0, hdrlen+initlen+1);
+    // 变量s（即char*数组）指向SDS结构体中的buf数组.
+    // 注意：sh是指针变量, 它指向SDS结构体的起始位置, 将其移动hdrlen长度, 正好等于SDS结构体中的char*数组位置. 这是C语言的指针运算
     s = (char*)sh+hdrlen;
     fp = ((unsigned char*)s)-1;
+    // 赋值SDS结构体的头部字段
     switch(type) {
         case SDS_TYPE_5: {
             *fp = type | (initlen << SDS_TYPE_BITS);
@@ -141,8 +120,10 @@ sds sdsnewlen(const void *init, size_t initlen) {
             break;
         }
     }
+    // 将要传入的字符串拷贝给sds变量
     if (initlen && init)
         memcpy(s, init, initlen);
+    // 变量s末尾增加字符串截止符号
     s[initlen] = '\0';
     return s;
 }
@@ -217,6 +198,7 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {
     len = sdslen(s);
     sh = (char*)s-sdsHdrSize(oldtype);
     newlen = (len+addlen);
+    // 小于 1MB 翻倍扩容, 大于 1MB 按 1MB 扩容
     if (newlen < SDS_MAX_PREALLOC)
         newlen *= 2;
     else
@@ -397,14 +379,20 @@ sds sdsgrowzero(sds s, size_t len) {
  *
  * After the call, the passed sds string is no longer valid and all the
  * references must be substituted with the new pointer returned by the call. */
+// 目标字符串s, 源字符串t, 要追加的长度len
 sds sdscatlen(sds s, const void *t, size_t len) {
+    // 获取目标字符串的长度
     size_t curlen = sdslen(s);
-
+    // 判断是否需要扩容目标字符串
     s = sdsMakeRoomFor(s,len);
     if (s == NULL) return NULL;
+    // s+curlen表示目标字符串的结尾, 这边是把源字符串t中len长度的数据拷贝目标字符串结尾
     memcpy(s+curlen, t, len);
+    // 拷贝完成后设置目标字符串的最新长度, 即目标字符串原长度 + 拷贝的长度
     sdssetlen(s, curlen+len);
+    // 设置目标字符串的最后一个字符为\0
     s[curlen+len] = '\0';
+    // 然后返回目标字符串
     return s;
 }
 
