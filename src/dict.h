@@ -1,36 +1,8 @@
-/* Hash Tables Implementation.
- *
- * This file implements in-memory hash tables with insert/del/replace/find/
- * get-random-element operations. Hash tables will auto-resize if needed
- * tables of power of two in size are used, collisions are handled by
- * chaining. See the source code for more information... :)
- *
- * Copyright (c) 2006-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+
+/**
+ * Redis对Hash表的实现。
+ * dict.h主要定义了Hash表的结构、哈希项、以及Hash表的各种操作函数.
+ * 针对哈希冲突, redis采用了链式哈希; 对应rehash开销, redis实现了渐进式rehash设计.
  */
 
 #include <stdint.h>
@@ -44,15 +16,26 @@
 /* Unused arguments generate annoying warnings... */
 #define DICT_NOTUSED(V) ((void) V)
 
+/**
+ * 哈希项
+ */
 typedef struct dictEntry {
+    // 指向键的指针
     void *key;
+    /*
+     * redis 使用共用体(union)定义k-v中的v值, 因为共用体所有成员占用同一段内存, 并且
+     * 占用的内存等于类型最长的成员占用的内存, 所以当v值为整数或者双精度浮点数时, 由于直接
+     * 就是64位, 所以无需再存储一个指针指向v值, 可以节约内存.
+     */
     union {
-        // 指向实际值的指针
+        // 指向实际值的指针.
         void *val;
+        // 除此之外, redis还定义3个变量：无符号64位整数, 有符号64位整数和double类的值
         uint64_t u64;
         int64_t s64;
         double d;
     } v;
+    // 指向下一个哈希项的指针, 用来实现链式哈希
     struct dictEntry *next;
 } dictEntry;
 
@@ -64,22 +47,38 @@ typedef struct dictType {
     void (*keyDestructor)(void *privdata, void *key);
     void (*valDestructor)(void *privdata, void *obj);
 } dictType;
-
-/* This is our hash table structure. Every dictionary has two of this as we
- * implement incremental rehashing, for the old to the new table. */
+/**
+ *  redis的哈希表. dict hash table
+ */
 typedef struct dictht {
+    // 二级指针(指向某个指针的指针), 每个元素是一个指向哈希项(dictEntity)的指针
     dictEntry **table;
+    // hash表的大小
     unsigned long size;
     unsigned long sizemask;
     unsigned long used;
 } dictht;
 
+/**
+ * 真正对外提供哈希表功能的结构体.
+ * 这个结构体定义了2个哈希表{@link dictht}, 用于 rehash 时交替保存数据.
+ */
 typedef struct dict {
     dictType *type;
     void *privdata;
-    // 两个hash表, 用于rehash操作
+    /*
+     * 1) 正常服务请求阶段, 所有的键值对写入到ht[0];
+     * 2) 执行 rehash 操作时, 键值对被迁移到哈希表ht[1]中
+     * 3) 迁移完成后, ht[0]的空间释放, 把ht[1]的地址赋给ht[0], ht[1]的表大小重新设置为0.
+     */
     dictht ht[2];
-    // 当这个值为-1时, 表示hash表没有在进行rehash操作
+    /*
+     * 表示当前是否存在rehash操作, 如果是, 当前rehash再对哪个bucket做数据迁移：
+     * 1) 值为-1, 表示hash表没有在进行rehash操作;
+     * 2) 值为0,  表示对 ht[0]中的第一个 bucket 进行数据迁移;
+     * 3) 值为1,  表示对 ht[0]中的第二个 bucket 进行数据迁移;
+     * 4) 值为2,  .... 以此类推
+     */
     long rehashidx;
     unsigned long iterators; /* number of iterators currently running */
 } dict;

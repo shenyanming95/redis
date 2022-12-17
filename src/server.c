@@ -1425,12 +1425,11 @@ int incrementallyRehash(int dbid) {
     return 0;
 }
 
-/* This function is called once a background process of some kind terminates,
- * as we want to avoid resizing the hash tables when there is a child in order
- * to play well with copy-on-write (otherwise when a resize happens lots of
- * memory pages are copied). The goal of this function is to update the ability
- * for dict.c to resize the hash tables accordingly to the fact we have o not
- * running childs. */
+/**
+ * 当 redis 的后台子进程执行结束, 就会调用此函数. 这是因为避免在有子进程时调整哈希表的大小, 以便很好地使用写时复制
+ * （否则, 当调整大小发生时, 会复制大量内存页面). 这个函数是用来更新 dict 即哈希表的扩容能力: 当前没有 RDB 子进程,
+ * 并且也没有 AOF 子进程时允许 dict 扩容, 否则禁止(除非达到临界值, 详见_dictExpandIfNeeded()函数)
+ */
 void updateDictResizePolicy(void) {
     if (!hasActiveChildProcess())
         dictEnableResize();
