@@ -1,31 +1,19 @@
-/* quicklist.h - A generic doubly linked quicklist implementation
+/*
+ * 一个 quicklist 就是一个链表, 而链表中的每个元素又是一个 ziplist.
  *
- * Copyright (c) 2014, Matt Stancliff <matt@genges.com>
- * All rights reserved.
+ *     链表头                                 链表尾
+ *  _____________     _____________     _____________
+ * |quicklistNode| → |quicklistNode| → |quicklistNode|
+ *  -------------     -------------     -------------
+ *        ↓                 ↓                 ↓
+ *    {ziplist}         {ziplist}         {ziplist}
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this quicklist of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this quicklist of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ *  当插入一个新元素时, quicklist首先检查插入位置的 ziplist 是否能容纳该元素：
+ *  1、单个ziplist不要超过8kb;
+ *  2、单个ziplist里的元素个数是否满足要求;
+ *  任一一个条件满足, quicklist便可以在当前的quicklistnode中插入元素, 否则会新建一个quicklistnode.
+ *  这样通过控制每个 quicklistNode 中, ziplist 的大小或是元素个数, 有效减少了在 ziplist 中新增或修改元素后,
+ *  发生连锁更新的情况, 从而提供了更好的访问性能.
  */
 
 #include <stdint.h> // for UINTPTR_MAX
@@ -44,16 +32,18 @@
  * attempted_compress: 1 bit, boolean, used for verifying during testing.
  * extra: 10 bits, free for future use; pads out the remainder of 32 bits */
 typedef struct quicklistNode {
+    // 前驱结点
     struct quicklistNode *prev;
+    // 后继结点
     struct quicklistNode *next;
-    unsigned char *zl;
-    unsigned int sz;             /* ziplist size in bytes */
-    unsigned int count : 16;     /* count of items in ziplist */
-    unsigned int encoding : 2;   /* RAW==1 or LZF==2 */
-    unsigned int container : 2;  /* NONE==1 or ZIPLIST==2 */
-    unsigned int recompress : 1; /* was this node previous compressed? */
-    unsigned int attempted_compress : 1; /* node can't compress; too small */
-    unsigned int extra : 10; /* more bits to steal for future usage */
+    unsigned char *zl;           /* quicklistNode指向的ziplist */
+    unsigned int sz;             /* ziplist的字节大小 */
+    unsigned int count : 16;     /* ziplist中的元素个数 */
+    unsigned int encoding : 2;   /* 编码格式, 原生字节数组或压缩存储: RAW==1 or LZF==2 */
+    unsigned int container : 2;  /* 存储方式: NONE==1 or ZIPLIST==2 */
+    unsigned int recompress : 1; /* 数据是否被压缩 */
+    unsigned int attempted_compress : 1; /* 数据能否被压缩 */
+    unsigned int extra : 10; /* 预留的bit位 */
 } quicklistNode;
 
 /* quicklistLZF is a 4+N byte struct holding 'sz' followed by 'compressed'.
@@ -103,10 +93,10 @@ typedef struct quicklistBookmark {
  * 'bookmakrs are an optional feature that is used by realloc this struct,
  *      so that they don't consume memory when not used. */
 typedef struct quicklist {
-    quicklistNode *head;
-    quicklistNode *tail;
-    unsigned long count;        /* total count of all entries in all ziplists */
-    unsigned long len;          /* number of quicklistNodes */
+    quicklistNode *head;        /* 链表头 */
+    quicklistNode *tail;        /* 链表尾 */
+    unsigned long count;        /* 所有ziplist中的总元素个数 */
+    unsigned long len;          /* quicklistNodes的个数 */
     int fill : QL_FILL_BITS;              /* fill factor for individual nodes */
     unsigned int compress : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
     unsigned int bookmark_count: QL_BM_BITS;

@@ -1,32 +1,4 @@
-/* Redis Object implementation.
- *
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
+/* Redis Object implementation.*/
 
 #include "server.h"
 #include <math.h>
@@ -38,6 +10,12 @@
 
 /* ===================== Creation and parsing of objects ==================== */
 
+/**
+ * 创建一个 redisObject 对象
+ * @param type 对象类型, 有5种,
+ * @param ptr 值指针
+ * @return
+ */
 robj *createObject(int type, void *ptr) {
     robj *o = zmalloc(sizeof(*o));
     o->type = type;
@@ -82,11 +60,16 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
 robj *createEmbeddedStringObject(const char *ptr, size_t len) {
+    // 分配内存大小, 等于：redisObject大小 + sdshdr8大小 + 字符串大小 + '\0'结束字符 1字节
     robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    // 创建 SDS 结构的指针 sh, 并把 sh 指向这块连续空间中 SDS 结构头所在的位置.
+    // o 是 redisObject 结构体的变量, o+1 表示将内存地址从变量 o 开始移动一段距离, 其距离等于 redisObject 这个结构体的大小.
     struct sdshdr8 *sh = (void*)(o+1);
 
     o->type = OBJ_STRING;
     o->encoding = OBJ_ENCODING_EMBSTR;
+    // sh+1 表示把内存地址从 sh 起始地址开始移动一定的大小, 移动的距离等于 sdshdr8 结构体的大小,
+    // 也就是指向字符数组的起始位置.
     o->ptr = sh+1;
     o->refcount = 1;
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
@@ -101,6 +84,7 @@ robj *createEmbeddedStringObject(const char *ptr, size_t len) {
     if (ptr == SDS_NOINIT)
         sh->buf[len] = '\0';
     else if (ptr) {
+        // 将ptr指向的字符串, 拷贝到SDS结构体中的字符数组, 拷贝len长度.
         memcpy(sh->buf,ptr,len);
         sh->buf[len] = '\0';
     } else {
@@ -110,15 +94,18 @@ robj *createEmbeddedStringObject(const char *ptr, size_t len) {
 }
 
 /* Create a string object with EMBSTR encoding if it is smaller than
- * OBJ_ENCODING_EMBSTR_SIZE_LIMIT, otherwise the RAW encoding is
- * used.
+ * OBJ_ENCODING_EMBSTR_SIZE_LIMIT, otherwise the RAW encoding is used.
  *
  * The current limit of 44 is chosen so that the biggest string object
  * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
 #define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44
 robj *createStringObject(const char *ptr, size_t len) {
+    // 创建嵌入式字符串, 字符串长度小于等于44字节.
+    // 创建嵌入式字符串, Redis 会使用一块连续的内存空间, 来同时保存 redisObject 和 SDS 结构, 保证内存分配只有一次, 也避免了内存碎片.
     if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT)
         return createEmbeddedStringObject(ptr,len);
+    // 创建普通字符串, 字符串长度大于44字节.
+    // 创建普通字符串, Redis 需要分别给 redisObject 和 SDS 分别分配一次内存, 既带来了内存分配开销, 同时也会导致内存碎片.
     else
         return createRawStringObject(ptr,len);
 }
