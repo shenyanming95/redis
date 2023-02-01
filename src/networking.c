@@ -922,7 +922,7 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip) {
 }
 
 /**
- * 接收客户端连接, 创建已连接套接字 cfd
+ * 接收客户端连接, 创建已连接套接字
  * @param el
  * @param fd
  * @param privdata
@@ -1861,7 +1861,7 @@ void processInputBuffer(client *c) {
 /**
  * 执行客户端的请求, 读取客户端发来的命令, 这是整个命令执行过程的起点. 整个链路为：
  * 1) 命令读取, 执行 readQueryFromClient() 函数
- * 2) 命令解析, 执行 processInputBufferAndReplicate() 函数
+ * 2) 命令解析, 执行 processInputBuffer() 函数
  * 3) 命令执行, 执行 processCommandAndResetClient() 函数
  * 4) 结果返回, 执行 addReply() 函数
  *
