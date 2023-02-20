@@ -334,7 +334,7 @@ typedef long long ustime_t; /* microsecond time type. */
 #define SET_OP_DIFF 1
 #define SET_OP_INTER 2
 
-/* Redis maxmemory strategies. Instead of using just incremental number
+/* 内存管理策略. Instead of using just incremental number
  * for this defines, we use a set of flags so that testing for certain
  * properties common to multiple policies is faster. */
 #define MAXMEMORY_FLAG_LRU (1<<0)
@@ -583,7 +583,7 @@ typedef struct RedisModuleDigest {
 #define OBJ_FIRST_SPECIAL_REFCOUNT OBJ_STATIC_REFCOUNT
 
 /**
- * redis的基本数据对象, 用来保存键值对中的值.
+ * redis的基本数据结构体, 用来保存键值对中的值.
  *
  * 其中变量 type、encoding、lru 后面都跟着一个冒号":", 并且指定了一个数值, 表示该元数据占用的比特数.
  * 这种变量后使用冒号和数值的定义方法, 是 C 语言中的位域定义方法: 通过位域定义可以将一个数据类型中的bits,
@@ -598,9 +598,11 @@ typedef struct redisObject {
     unsigned type: 4;
     // redisObject 的编码类型, 是 Redis 内部实现各种数据类型所用的数据结构（SDS/ziplist/intset/hashtable/skiplist等）4个bits.
     unsigned encoding: 4;
-    // redisObject 的缓存回收时间, 24个bits
-    unsigned lru: LRU_BITS; /* LRU time (relative to global lru_clock) or
-                            * LFU data (least significant 8 bits frequency and most significant 16 bits access time). */
+    // 缓存过期时间, 默认是24个比特位.
+    // 如果启用LRU算法, 那么此值等于全局时钟(getLRUClock方法返回值).
+    // 如果启用LFU算法, 那么此值的低8bits统计键值对的访问次数, 高16bits记录访问的时间戳.
+    // 关于缓存相关的入口函数有: createObject()-初始化时钟, lookupKey()-更新时钟, freeMemoryIfNeed()-数据淘汰.
+    unsigned lru: LRU_BITS;
     // redisObject的引用计数, 4个字节
     int refcount;
     // 指向值的指针, 8个字节
@@ -1341,8 +1343,11 @@ struct redisServer {
     int get_ack_from_slaves;            /* If true we send REPLCONF GETACK. */
     /* Limits */
     unsigned int maxclients;            /* Max number of simultaneous clients */
-    unsigned long long maxmemory;   /* Max number of memory bytes to use */
-    int maxmemory_policy;           /* Policy for key eviction */
+
+    // 这边使用两个long long, 是因为不同的编译器对长整型变量的定义不同, 为了确保变量能够正确地占用8个字节.
+    unsigned long long maxmemory;   /* 可以使用的最大内存容量. 当 server 使用的实际内存量超出该阈值时, 就会根据 maxmemory-policy 配置项定义的策略, 执行内存淘汰操作 */
+
+    int maxmemory_policy;           /* 设定了 server 的内存淘汰策略, 主要包括近似 LRU 算法、LFU 算法、按 TTL 值淘汰和随机淘汰等几种算法 */
     int maxmemory_samples;          /* Pricision of random sampling */
     int lfu_log_factor;             /* LFU logarithmic counter factor. */
     int lfu_decay_time;             /* LFU counter decay factor. */
@@ -2666,6 +2671,9 @@ size_t getSlaveKeyWithExpireCount(void);
 /* evict.c -- maxmemory handling and LRU eviction. */
 void evictionPoolAlloc(void);
 
+/**
+ * 初始访问次数 LFU_INIT_VAL = 5，就是为了避免一个 key 在创建后，不会面临被立即淘汰的情况发生
+ */
 #define LFU_INIT_VAL 5
 
 unsigned long LFUGetTimeInMinutes(void);

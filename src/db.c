@@ -1,32 +1,3 @@
-/*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 #include "cluster.h"
 #include "atomicvar.h"
@@ -40,21 +11,41 @@
 
 int keyIsExpired(redisDb *db, robj *key);
 
-/* Update LFU when an object is accessed.
- * Firstly, decrement the counter if the decrement time is reached.
- * Then logarithmically increment the counter, and update the access time. */
+/**
+ * 更新键值对的访问频率, 一共分为三步：
+ * 1) 根据距离上次访问的时长, 衰减访问次数;
+ * 2) 根据当前访问, 更新访问次数;
+ * 3) 更新lru变量值;
+ *
+ * @param val redisObject指针
+ */
 void updateLFU(robj *val) {
+    // 访问频率衰减：LFU算法需要考虑键值对的访问是多长时间段发生的, 如果上次被访问的时间距离当前时间越长, 那么它的频率越低.
     unsigned long counter = LFUDecrAndReturn(val);
+    // 增加键值对的访问次数
     counter = LFULogIncr(counter);
+    // 获取当前时间, 与访问次数进行或运算后重新赋值.
     val->lru = (LFUGetTimeInMinutes()<<8) | counter;
 }
 
 /* Low level key lookup API, not actually called directly from commands
  * implementations that should instead rely on lookupKeyRead(),
  * lookupKeyWrite() and lookupKeyReadWithFlags(). */
+/**
+ * redis内部用于查找键值对的接口, 不会被客户端的命令请求直接调用,
+ * 一般是被：lookupKeyRead()、lookupKeyWrite()、lookupKeyReadWithFlags()调用.
+ * 该函数会从全局哈希表中查找要访问的键值对.
+ *
+ * @param db 数据库
+ * @param key 键
+ * @param flags
+ * @return
+ */
 robj *lookupKey(redisDb *db, robj *key, int flags) {
+    // 查找键值对
     dictEntry *de = dictFind(db->dict,key->ptr);
     if (de) {
+        // 获取实际的redisObject结构体
         robj *val = dictGetVal(de);
 
         /* Update the access time for the ageing algorithm.
@@ -62,8 +53,10 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
          * a copy on write madness. */
         if (!hasActiveChildProcess() && !(flags & LOOKUP_NOTOUCH)){
             if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
+                // 如果使用了LFU策略，更新访问频率
                 updateLFU(val);
             } else {
+                // 否则调用LRU_CLOCK函数获取全局LRU时钟值
                 val->lru = LRU_CLOCK();
             }
         }

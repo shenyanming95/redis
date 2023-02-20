@@ -23,11 +23,16 @@ robj *createObject(int type, void *ptr) {
     o->ptr = ptr;
     o->refcount = 1;
 
-    /* Set the LRU to the current lruclock (minutes resolution), or
-     * alternatively the LFU counter. */
+    /*
+     * redis server 使用 LFU 策略, 每一个 redisObject 结构体(也就是用户设置的key)的lru变量会被初始化设置为LFU算法的计算值.
+     * 反之, 如果没有使用LFU策略, 那么就调用 LRU_CLOCK() 函数来记录当前的全局 LRU 时钟值.
+     */
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
+        // 使用LFU算法时, lru变量包括以分钟为精度的UNIX时间戳和访问次数5
         o->lru = (LFUGetTimeInMinutes()<<8) | LFU_INIT_VAL;
     } else {
+        // 调用LRU_CLOCK函数获取LRU时钟值.
+        // 当一个键值对被访问时, 它的LRU时终值就会被更新, redis 对键值对的访问操作最终都会调用 lookupKey 函数.
         o->lru = LRU_CLOCK();
     }
     return o;
