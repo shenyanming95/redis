@@ -368,9 +368,14 @@ dictEntry *dictAddOrFind(dict *d, void *key) {
     return entry ? entry : existing;
 }
 
-/* Search and remove an element. This is an helper function for
- * dictDelete() and dictUnlink(), please check the top comment
- * of those functions. */
+/**
+ * 在给定的哈希表中找到指定的key, 将其删除
+ *
+ * @param d      待查找的哈希表
+ * @param key    待删除的key
+ * @param nofree 同步/异步删除标识, 0-同步删除, 1-异步删除
+ * @return 被删除的哈希表项, 为null说明没找到
+ */
 static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
     uint64_t h, idx;
     dictEntry *he, *prevHe;
@@ -379,27 +384,37 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
     if (d->ht[0].used == 0 && d->ht[1].used == 0) return NULL;
 
     if (dictIsRehashing(d)) _dictRehashStep(d);
+
+    // 计算key的哈希值
     h = dictHashKey(d, key);
 
     for (table = 0; table <= 1; table++) {
+        // 根据key的哈希值获取它所在的哈希桶编号
         idx = h & d->ht[table].sizemask;
+        // 获取key所在哈希桶的第一个哈希项
         he = d->ht[table].table[idx];
         prevHe = NULL;
+        // 逐一查找被删除的key是否存在
         while(he) {
+            // key匹配上说明找到目标key
             if (key==he->key || dictCompareKeys(d, key, he->key)) {
-                /* Unlink the element from the list */
+                // 将它从链表中移除
                 if (prevHe)
                     prevHe->next = he->next;
                 else
                     d->ht[table].table[idx] = he->next;
+                // 如果同步删除, 释放key和value的内存空间
                 if (!nofree) {
-                    dictFreeKey(d, he);
-                    dictFreeVal(d, he);
+                    // 释放key和value的内存, 通过宏定义来实现.
+                    // 本质是根据操作的哈希表类型, 调用对应的valDestructor函数和keyDestructor函数来释放内存.
+                    dictFreeKey(d, he); //其中一个实现, 调用函数：dictSdsDestructor 释放key的内存
+                    dictFreeVal(d, he); //其中一个实现, 调用函数：dictObjectDestructor 释放val的内存
                     zfree(he);
                 }
                 d->ht[table].used--;
                 return he;
             }
+            // 未匹配上key则继续寻找
             prevHe = he;
             he = he->next;
         }
@@ -411,6 +426,7 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
 /* Remove an element, returning DICT_OK on success or DICT_ERR if the
  * element was not found. */
 int dictDelete(dict *ht, const void *key) {
+    // 同步删除一个键值对
     return dictGenericDelete(ht,key,0) ? DICT_OK : DICT_ERR;
 }
 
@@ -436,6 +452,7 @@ int dictDelete(dict *ht, const void *key) {
  * dictFreeUnlinkedEntry(entry); // <- This does not need to lookup again.
  */
 dictEntry *dictUnlink(dict *ht, const void *key) {
+    // 异步删除一个键值对
     return dictGenericDelete(ht,key,1);
 }
 

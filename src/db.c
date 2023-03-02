@@ -1222,15 +1222,21 @@ long long getExpire(redisDb *db, robj *key) {
  * will be consistent even if we allow write operations against expiring
  * keys. */
 void propagateExpire(redisDb *db, robj *key, int lazy) {
+    /*
+     * argv是一个 redisObject 结构体数组.
+     * 第一个元素, 是删除操作对应的命令对象;
+     * 第二个元素, 是被删除的key对象;
+     */
     robj *argv[2];
-
-    argv[0] = lazy ? shared.unlink : shared.del;
+    argv[0] = lazy ? shared.unlink : shared.del; // 启用惰性删除, 则使用 UNLINK 命令; 反之使用 DEL 命令.
     argv[1] = key;
     incrRefCount(argv[0]);
     incrRefCount(argv[1]);
 
+    // 启用了AOF日志, 将删除操作写入AOF文件.
     if (server.aof_state != AOF_OFF)
         feedAppendOnlyFile(server.delCommand,db->id,argv,2);
+    // 将删除操作同步给从节点
     replicationFeedSlaves(server.slaves,db->id,argv,2);
 
     decrRefCount(argv[0]);

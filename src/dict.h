@@ -44,7 +44,13 @@ typedef struct dictType {
     void *(*keyDup)(void *privdata, const void *key);
     void *(*valDup)(void *privdata, const void *obj);
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
+    /*
+     * 释放哈希表key的函数指针, 可以通过：server.c文件的dbDictType查看其实现方式.
+     */
     void (*keyDestructor)(void *privdata, void *key);
+    /*
+     * 释放哈希表val的函数指针, 可以通过：server.c文件的dbDictType查看其实现方式.
+     */
     void (*valDestructor)(void *privdata, void *obj);
 } dictType;
 /**

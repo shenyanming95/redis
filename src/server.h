@@ -1432,9 +1432,10 @@ struct redisServer {
     int lua_always_replicate_commands; /* Default replication type. */
     int lua_oom;          /* OOM detected when script start? */
     /* Lazy free */
-    int lazyfree_lazy_eviction;
-    int lazyfree_lazy_expire;
-    int lazyfree_lazy_server_del;
+    /* redis 4.0版本提供的功能, 用于配置是否开启惰性删除(即使用后台线程来执行删除数据的任务) */
+    int lazyfree_lazy_eviction;    /*内存达到maxmemory并设置了淘汰策略, 会使用异步方式释放内存*/
+    int lazyfree_lazy_expire;      /*key在过期删除时尝试异步释放内存*/
+    int lazyfree_lazy_server_del;  /*执行 RENAME/MOVE 等命令或需要覆盖一个 key 时, Redis 内部删除旧 key 尝试异步释放内存*/
     int lazyfree_lazy_user_del;
     /* Latency monitor */
     long long latency_monitor_threshold;

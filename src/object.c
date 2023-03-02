@@ -11,7 +11,7 @@
 /* ===================== Creation and parsing of objects ==================== */
 
 /**
- * 创建一个 redisObject 对象
+ * 创建一个 redisObject 结构体
  * @param type 对象类型, 有5种,
  * @param ptr 值指针
  * @return
@@ -351,6 +351,7 @@ void incrRefCount(robj *o) {
 }
 
 void decrRefCount(robj *o) {
+    // 当引用计数为1, 才会根据实际类型来释放内存
     if (o->refcount == 1) {
         switch(o->type) {
         case OBJ_STRING: freeStringObject(o); break;
@@ -364,6 +365,7 @@ void decrRefCount(robj *o) {
         }
         zfree(o);
     } else {
+        // 其它情况, 只会将引用计数减一
         if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
     }

@@ -1274,7 +1274,7 @@ dictType dbDictType = {
     NULL,                       /* val dup */
     dictSdsKeyCompare,          /* key compare */
     dictSdsDestructor,          /* key destructor */
-    dictObjectDestructor   /* val destructor */
+    dictObjectDestructor        /* val destructor */
 };
 
 /* server.lua_scripts sha (as sds string) -> scripts (as robj) cache. */

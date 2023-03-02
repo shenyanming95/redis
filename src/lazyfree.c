@@ -13,21 +13,14 @@ size_t lazyfreeGetPendingObjectsCount(void) {
     return aux;
 }
 
-/* Return the amount of work needed in order to free an object.
- * The return value is not always the actual number of allocations the
- * object is compoesd of, but a number proportional to it.
+/**
+ * 用于评估一个 redisObject 结构体的删除开销.
+ * 根据要删除的键值对类型, 直接评估其开销, 当键值对类型属于 List、Hash、Set 和 Sorted Set 这四种集合类型中的一种,
+ * 并且没有使用紧凑型内存结构来保存, 那么该键值对的删除开销就等于集合中的元素个数. 其它情况的开销固定为1.
  *
- * For strings the function always returns 1.
- *
- * For aggregated objects represented by hash tables or other data structures
- * the function just returns the number of elements the object is composed of.
- *
- * Objects composed of single allocations are always reported as having a
- * single item even if they are actually logical composed of multiple
- * elements.
- *
- * For lists the function returns the number of elements in the quicklist
- * representing the list. */
+ * @param obj
+ * @return
+ */
 size_t lazyfreeGetFreeEffort(robj *obj) {
     if (obj->type == OBJ_LIST) {
         quicklist *ql = obj->ptr;
@@ -52,16 +45,17 @@ size_t lazyfreeGetFreeEffort(robj *obj) {
  * will be reclaimed in a different bio.c thread. */
 #define LAZYFREE_THRESHOLD 64
 int dbAsyncDelete(redisDb *db, robj *key) {
-    /* Deleting an entry from the expires dict will not free the sds of
-     * the key, because it is shared with the main dictionary. */
+    // 在过期key的哈希表中同步删除那些已经过期的键值对
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
 
     /* If the value is composed of a few allocations, to free in a lazy way
      * is actually just slower... So under a certain limit we just free
      * the object synchronously. */
+    // 异步删除的话, 只会将指定key从哈希表中移除, 但是它占据的内存空间不会释放, 原因如上.
     dictEntry *de = dictUnlink(db->dict,key->ptr);
     if (de) {
         robj *val = dictGetVal(de);
+        // 计算释放被淘汰键值对内存空间的开销
         size_t free_effort = lazyfreeGetFreeEffort(val);
 
         /* If releasing the object is too much work, do it in the background
@@ -72,15 +66,17 @@ int dbAsyncDelete(redisDb *db, robj *key) {
          * objects, and then call dbDelete(). In this case we'll fall
          * through and reach the dictFreeUnlinkedEntry() call, that will be
          * equivalent to just calling decrRefCount(). */
+        // 当被淘汰的键值对的删除开销超过64, reids 会创建一个后台任务执行惰性删除.
+        // 如果开销较小, redis会略过这段代码, 执行下面的代码在主I/O线程同步删除.
         if (free_effort > LAZYFREE_THRESHOLD && val->refcount == 1) {
             atomicIncr(lazyfree_objects,1);
-            bioCreateBackgroundJob(BIO_LAZY_FREE,val,NULL,NULL);
-            dictSetVal(db->dict,de,NULL);
+            bioCreateBackgroundJob(BIO_LAZY_FREE,val,NULL,NULL);//创建惰性删除的后台任务, 交给后台线程执行
+            dictSetVal(db->dict,de,NULL); //将被淘汰键值对的value设置为NULL
         }
     }
 
-    /* Release the key-val pair, or just the key if we set the val
-     * field to NULL in order to lazy free it later. */
+    // 若被淘汰的键值对不是集合类型, 或者是集合类型但元素个数小于等于64时,
+    // 直接调用 dictFreeUnlinkedEntry 函数（在 dict.c 文件中）来释放键值对所占的内存空间
     if (de) {
         dictFreeUnlinkedEntry(db->dict,de);
         if (server.cluster_enabled) slotToKeyDel(key->ptr);

@@ -583,6 +583,15 @@ int freeMemoryIfNeeded(void) {
              * we only care about memory used by the key space. */
             delta = (long long) zmalloc_used_memory();
             latencyStartMonitor(eviction_latency);
+
+            /*
+             * redis的删除操作包含两步：
+             * 1) 将键值对从哈希表中剔除;
+             * 2) 释放键值对占用的内存空间;
+             *
+             * 如果两个步骤一起做就算是『同步删除』, 如果只做了第一步就是『异步删除』.
+             */
+
             // 如果配置了惰性删除, 则进行异步删除
             if (server.lazyfree_lazy_eviction)
                 dbAsyncDelete(db,keyobj);
@@ -613,6 +622,7 @@ int freeMemoryIfNeeded(void) {
              * memory, since the "mem_freed" amount is computed only
              * across the dbAsyncDelete() call, while the thread can
              * release the memory all the time. */
+            // 若使用了惰性删除, 并且每删除16个键值对后, 统计当前内存使用量
             if (server.lazyfree_lazy_eviction && !(keys_freed % 16)) {
                 if (getMaxmemoryState(NULL,NULL,NULL,NULL) == C_OK) {
                     /* Let's satisfy our stop condition. */
