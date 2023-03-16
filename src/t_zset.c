@@ -41,7 +41,7 @@ int zslLexValueLteMax(sds value, zlexrangespec *spec);
 /* Create a skiplist node with the specified number of levels.
  * The SDS string 'ele' is referenced by the node after the call. */
 zskiplistNode *zslCreateNode(int level, double score, sds ele) {
-    zskiplizslRandomLevelstNode *zn =
+    zskiplistNode *zn =
         zmalloc(sizeof(*zn)+level*sizeof(struct zskiplistLevel));
     zn->score = score;
     zn->ele = ele;

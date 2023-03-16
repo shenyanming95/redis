@@ -1207,7 +1207,13 @@ struct redisServer {
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
     pid_t aof_child_pid;            /* PID if rewriting process */
-    list *aof_rewrite_buf_blocks;   /* Hold changes during an AOF rewrite. */
+
+    /**
+     * 在进行AOF文件重写时, 用于记录父进程收到的写请求.
+     * 列表中的每一个元素是 aofrwblock 结构体类型.
+     */
+    list *aof_rewrite_buf_blocks;
+
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
     int aof_selected_db; /* Currently selected DB in AOF */
@@ -1223,13 +1229,29 @@ struct redisServer {
     int aof_last_write_errno;       /* Valid if aof_last_write_status is ERR */
     int aof_load_truncated;         /* Don't stop on unexpected AOF EOF. */
     int aof_use_rdb_preamble;       /* Use RDB preamble on AOF rewrites. */
-    /* AOF pipes used to communicate between parent and child during rewrite. */
+
+    /**
+     * 对应了主进程和重写子进程用于传递操作命令的管道, 作用是：发送 AOF 重写期间新的写操作
+     * aof_pipe_write_data_to_child 对应写描述符;
+     * aof_pipe_read_data_from_parent 对应读描述符,
+     */
     int aof_pipe_write_data_to_child;
     int aof_pipe_read_data_from_parent;
+    /**
+     * 对应了重写子进程向父进程发送ack信息的管道, 作用是：让父进程停止发送新的写操作
+     * aof_pipe_write_ack_to_parent 对应写描述符,
+     * aof_pipe_read_ack_from_child 对应读描述符;
+     */
     int aof_pipe_write_ack_to_parent;
     int aof_pipe_read_ack_from_child;
+    /**
+     * 对应了父进程向重写子进程发送ack信息的管道, 作用是：父进程通知子进程已收到通知
+     * aof_pipe_read_ack_from_parent 对应写描述符,
+     * aof_pipe_write_ack_to_child 对应读描述符;
+     */
     int aof_pipe_write_ack_to_child;
     int aof_pipe_read_ack_from_parent;
+
     int aof_stop_sending_diff;     /* If true stop sending accumulated diffs
                                       to child process. */
     sds aof_child_diff;             /* AOF diff accumulator child side. */

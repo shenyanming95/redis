@@ -1,30 +1,13 @@
 /*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
+ * redis用来创建 RDB 文件的函数有三个：
+ * 1) rdbSave(): server服务端在本地磁盘创建 RDB 文件的入口函数, 对应 client 的`save`命令;
+ * 2) rdbSaveBackground(): server服务端通过后台子进程方式在本地磁盘创建 RDB 文件的入口函数, 对应 client 的`bgsave`命令;
+ * 3) rdbSaveToSlavesSockets(): server服务端在主从复制时传输 RDB 文件的入口函数, 对应 server 执行主从复制命令和周期性检测主从复制状态时触发 RDB 生成;
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * RDB 文件的基本组成部分：
+ * ① 文件头：保存 redis 的魔数、RDB版本、redis版本、RDB文件创建时间、键值对占用的内存大小等信息;
+ * ② 文件数据部分：保存了 redis 数据库实际的所有键值对;
+ * ③ 文件尾：保存了 RBD 文件的结束标识符, 和整个文件的校验值(用于检查文件是否被篡改过);
  */
 
 #ifndef __RDB_H

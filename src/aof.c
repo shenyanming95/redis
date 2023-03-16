@@ -1,30 +1,10 @@
 /*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * AOF文件重写的函数实现：rewriteAppendOnlyFileBackground(), 它会通过fork函数创建一个AOF重写子进程.
+ * 主要有三个地方调用这个函数, 即触发AOF重写：
+ * 1）bgrewriteaofCommand函数(aof.c文件): 在 redis server 手动执行 bgrewriteaof 命令, 相当于手动触发 AOF rewrite;
+ * 2）startAppendOnly函数(aof.c文件): 会被 configSetCommand 函数(config.c)、restartAOFAfterSYNC函数(replication.c) 调用,
+ *                       前一个函数会在执行命令『config set appendonly yes』触发, 后一个函数会在主从节点复制过程中被调用;
+ * 3）serverCron函数(server.c文件): 周期性执行, 当检测到当前没有 RDB 子进程和 AOF 重写子进程在执行, 并且 server.aof_rewrite_scheduled 变量值为1, 就会触发 AOF 重写.
  */
 
 #include "server.h"
@@ -59,7 +39,11 @@ void aofClosePipes(void);
 
 #define AOF_RW_BUF_BLOCK_SIZE (1024*1024*10)    /* 10 MB per block */
 
+/**
+ * 记录AOF重写期间, 主进程收到的命令.
+ */
 typedef struct aofrwblock {
+    // buf数组已用空间和剩余可用空间
     unsigned long used, free;
     char buf[AOF_RW_BUF_BLOCK_SIZE];
 } aofrwblock;
@@ -102,6 +86,7 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(mask);
 
     while(1) {
+        // 从aof_rewrite_buf_blocks列表中取出数据块
         ln = listFirst(server.aof_rewrite_buf_blocks);
         block = ln ? ln->value : NULL;
         if (server.aof_stop_sending_diff || !block) {
@@ -110,6 +95,7 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
         if (block->used > 0) {
+            // 调用write将数据块写入主进程和重写子进程间的管道
             nwritten = write(server.aof_pipe_write_data_to_child,
                              block->buf,block->used);
             if (nwritten <= 0) return;
@@ -160,9 +146,9 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
         }
     }
 
-    /* Install a file event to send data to the rewrite child if there is
-     * not one already. */
+    // 检查aof_pipe_write_data_to_child描述符上是否有事件
     if (aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0) {
+        // 如果没有注册事件, 则注册一个写事件, 回调函数是aofChildWriteDiffData
         aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child,
             AE_WRITABLE, aofChildWriteDiffData, NULL);
     }
@@ -266,12 +252,12 @@ int startAppendOnly(void) {
         return C_ERR;
     }
     if (hasActiveChildProcess() && server.aof_child_pid == -1) {
+        // 当前存在RDB子进程, 将 AOF 重写设置为待调度执行
         server.aof_rewrite_scheduled = 1;
         serverLog(LL_WARNING,"AOF was enabled but there is already another background operation. An AOF background was scheduled to start when possible.");
     } else {
-        /* If there is a pending AOF rewrite, we need to switch it off and
-         * start a new one: the old one cannot be reused because it is not
-         * accumulating the AOF buffer. */
+        // 如果当前有AOF重写子进程在执行, 将其kill, 再重新调用
+        // rewriteAppendOnlyFileBackground() 进行 AOF 重写.
         if (server.aof_child_pid != -1) {
             serverLog(LL_WARNING,"AOF was enabled but there is already an AOF rewriting in background. Stopping background AOF and starting a rewrite now.");
             killAppendOnlyChild();
@@ -581,6 +567,14 @@ sds catAppendOnlyExpireAtCommand(sds buf, struct redisCommand *cmd, robj *key, r
     return buf;
 }
 
+/**
+ * 将客户端写请求的操作写入到AOF日志文件.
+ *
+ * @param cmd
+ * @param dictid
+ * @param argv
+ * @param argc
+ */
 void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
     robj *tmpargv[3];
@@ -642,6 +636,8 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
      * in a buffer, so that when the child process will do its work we
      * can append the differences to the new append only file. */
     if (server.aof_child_pid != -1)
+        // 当前存在AOF重写子进程, 调用aofRewriteBufferAppend()函数, 将父进程收到的命令操作写入到
+        // 全局变量 server 的 aof_rewrite_buf_blocks 列表中.
         aofRewriteBufferAppend((unsigned char*)buf,sdslen(buf));
 
     sdsfree(buf);
@@ -1295,21 +1291,39 @@ int rewriteModuleObject(rio *r, robj *key, robj *o) {
     return io.error ? 0 : 1;
 }
 
-/* This function is called by the child rewriting the AOF file to read
- * the difference accumulated from the parent into a buffer, that is
- * concatenated at the end of the rewrite. */
+/**
+ * 此函数实现了重写子进程向主进程读取操作命令, 一共会被3个函数调用：
+ * 1) rewriteAppendOnlyFileRio(): 这个函数由重写子进程执行的, 负责遍历 Redis 每个数据库, 生成 AOF 重写日志, 在这个过程会不时地调用 aofReadDiffFromParent 函数;
+ * 2) rewriteAppendOnlyFile(): 这个函数是重写日志的主体函数, 也是由重写子进程执行的, 本身会调用 rewriteAppendOnlyFileRio 函数. 此外在调用完 rewriteAppendOnlyFileRio 函数后,
+ *                             还会多次调用 aofReadDiffFromParent 函数, 以尽可能多得读取主进程在重写日志期间收到的操作命令;
+ * 3) rdbSaveRio(): 这个函数是创建 RDB 文件的主体函数, 当使用 AOF 和 RDB 混合持久化机制时, 这个函数也会调用 aofReadDiffFromParent 函数;
+ *
+ * @return
+ */
 ssize_t aofReadDiffFromParent(void) {
     char buf[65536]; /* Default pipe buffer size on most Linux systems. */
     ssize_t nread, total = 0;
-
+    // 调用read函数从aof_pipe_read_data_from_parent中读取数据
     while ((nread =
             read(server.aof_pipe_read_data_from_parent,buf,sizeof(buf))) > 0) {
+        // 将读取的操作命令追加到全局变量 server 的 aof_child_diff 字符串,
+        // 后续AOF 重写函数 rewriteAppendOnlyFile 的执行过程最后,
+        // aof_child_diff 字符串会被写入 AOF 重写日志文件.
         server.aof_child_diff = sdscatlen(server.aof_child_diff,buf,nread);
         total += nread;
     }
     return total;
 }
 
+/**
+ * 执行AOF文件的重写.
+ *
+ * rewriteAppendOnlyFileRio()函数会遍历每一个数据库, 读取每个键值对, 记录该键值对类型对应的『插入』命令以及价值对本身的数据.
+ * 例如：读取的 string 类型的键值对, 就会记录 SET 命令和对应的字符串内容.
+ *
+ * @param aof
+ * @return
+ */
 int rewriteAppendOnlyFileRio(rio *aof) {
     dictIterator *di = NULL;
     dictEntry *de;
@@ -1449,24 +1463,29 @@ int rewriteAppendOnlyFile(char *filename) {
         aofReadDiffFromParent();
     }
 
-    /* Ask the master to stop sending diffs. */
+    // 在完成日志重写或者多次向父进程读取操作命令后, aof重写子进程会调用 write 函数, 向 aof_pipe_write_ack_to_parent 描述符对应的管道中写入“！”
+    // 这就是重写子进程向主进程发送 ACK 信号, 让主进程停止发送收到的新写操作.
+    // 一旦这个pipe被写入数据了, 对应的pipe读描述符（即aof_pipe_read_ack_from_child）上注册的读事件就会被触发, 调用处理函数：aofChildPipeReadable()
     if (write(server.aof_pipe_write_ack_to_parent,"!",1) != 1) goto werr;
     if (anetNonBlock(NULL,server.aof_pipe_read_ack_from_parent) != ANET_OK)
         goto werr;
     /* We read the ACK from the server using a 10 seconds timeout. Normally
      * it should reply ASAP, but just in case we lose its reply, we are sure
      * the child will eventually get terminated. */
+    // 等待父进程响应ack.
     if (syncRead(server.aof_pipe_read_ack_from_parent,&byte,1,5000) != 1 ||
         byte != '!') goto werr;
     serverLog(LL_NOTICE,"Parent agreed to stop sending diffs. Finalizing AOF...");
 
-    /* Read the final diff if any. */
+    // 重写子进程收到ack后, 会再次调用aofReadDiffFromParent尝试把管道里可能存在的数据都读出来;
     aofReadDiffFromParent();
 
     /* Write the received diff to the file. */
     serverLog(LL_NOTICE,
         "Concatenating %.2f MB of AOF diff received from parent.",
         (double) sdslen(server.aof_child_diff) / (1024*1024));
+    // 将aof_child_diff中累积的操作命令写入AOF重写日志文件,
+    // 并将文件名 rename 为 temp-rewriteaof-bg-pid.aof.
     if (rioWrite(&aof,server.aof_child_diff,sdslen(server.aof_child_diff)) == 0)
         goto werr;
 
@@ -1507,21 +1526,22 @@ void aofChildPipeReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(el);
     UNUSED(privdata);
     UNUSED(mask);
-
+    // 从管道中读取数据, 如果读取的数据是"!", 调用wirte函数,
+    // 往 aof_pipe_write_ack_to_child 管道描述符上写入“!”, 表示主进程已经收到重写子进程发送的 ACK 信息
+    // 同时它会给重写子进程回复一个 ACK 信息.
     if (read(fd,&byte,1) == 1 && byte == '!') {
         serverLog(LL_NOTICE,"AOF rewrite child asks to stop sending diffs.");
+        // 父进程收到子进程ack后设置server.aof_stop_sending_diff为1，然后回复ack
         server.aof_stop_sending_diff = 1;
         if (write(server.aof_pipe_write_ack_to_child,"!",1) != 1) {
             /* If we can't send the ack, inform the user, but don't try again
              * since in the other side the children will use a timeout if the
              * kernel can't buffer our write, or, the children was
              * terminated. */
-            serverLog(LL_WARNING,"Can't send ACK to AOF child: %s",
-                strerror(errno));
+            serverLog(LL_WARNING,"Can't send ACK to AOF child: %s", strerror(errno));
         }
     }
-    /* Remove the handler since this can be called only one time during a
-     * rewrite. */
+    /* Remove the handler since this can be called only one time during a rewrite. */
     aeDeleteFileEvent(server.el,server.aof_pipe_read_ack_from_child,AE_READABLE);
 }
 
@@ -1533,21 +1553,28 @@ void aofChildPipeReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
 int aofCreatePipes(void) {
     int fds[6] = {-1, -1, -1, -1, -1, -1};
     int j;
-
+    // pipe属于系统调用, 它传入一个整型数组, 表示文件描述符, 第一个描述符表示从管道读取数据, 第二个描述符表示写入数据到管道.
     if (pipe(fds) == -1) goto error; /* parent -> children data. */
     if (pipe(fds+2) == -1) goto error; /* children -> parent ack. */
     if (pipe(fds+4) == -1) goto error; /* parent -> children ack. */
     /* Parent -> children data is non blocking. */
     if (anetNonBlock(NULL,fds[0]) != ANET_OK) goto error;
     if (anetNonBlock(NULL,fds[1]) != ANET_OK) goto error;
+    // children -> parent ack, 表示父进程从管道读取子进程的ack响应事件, 为其注册一个读事件. 对应的事件处理函数为：aofChildPipeReadable
     if (aeCreateFileEvent(server.el, fds[2], AE_READABLE, aofChildPipeReadable, NULL) == AE_ERR) goto error;
 
+    // fds[0]和fds[1]对应了主进程和重写子进程用于传递操作命令的管道, 分别对应读描述符和写描述符;
     server.aof_pipe_write_data_to_child = fds[1];
     server.aof_pipe_read_data_from_parent = fds[0];
+
+    // fds[2]和fds[3]对应了重写子进程向父进程发送ack信息的管道, 分别对应读描述符和写描述符
     server.aof_pipe_write_ack_to_parent = fds[3];
     server.aof_pipe_read_ack_from_child = fds[2];
+
+    // fds[4]和fds[5]对应了父进程向重写子进程发送ack信息的管道, 分别对应读描述符和写描述符
     server.aof_pipe_write_ack_to_child = fds[5];
     server.aof_pipe_read_ack_from_parent = fds[4];
+
     server.aof_stop_sending_diff = 0;
     return C_OK;
 
@@ -1587,16 +1614,18 @@ void aofClosePipes(void) {
  */
 int rewriteAppendOnlyFileBackground(void) {
     pid_t childpid;
-
+    // 存在活跃的子进程（RDB/AOF...）则退出
     if (hasActiveChildProcess()) return C_ERR;
+    // 创建管道pipe
     if (aofCreatePipes() != C_OK) return C_ERR;
     openChildInfoPipe();
     if ((childpid = redisFork()) == 0) {
         char tmpfile[256];
 
-        /* Child */
+        /* 子进程执行逻辑 */
         redisSetProcTitle("redis-aof-rewrite");
         snprintf(tmpfile,256,"temp-rewriteaof-bg-%d.aof", (int) getpid());
+        // 创建完子进程后, 让其执行 rewriteAppendOnlyFile()方法重写AOF, 最后再将子进程退出.
         if (rewriteAppendOnlyFile(tmpfile) == C_OK) {
             sendChildCOWInfo(CHILD_INFO_TYPE_AOF, "AOF rewrite");
             exitFromChild(0);
@@ -1604,7 +1633,7 @@ int rewriteAppendOnlyFileBackground(void) {
             exitFromChild(1);
         }
     } else {
-        /* Parent */
+        /* 父进程执行逻辑 */
         if (childpid == -1) {
             closeChildInfoPipe();
             serverLog(LL_WARNING,
@@ -1613,8 +1642,11 @@ int rewriteAppendOnlyFileBackground(void) {
             aofClosePipes();
             return C_ERR;
         }
-        serverLog(LL_NOTICE,
-            "Background append only file rewriting started by pid %d",childpid);
+        serverLog(LL_NOTICE,"Background append only file rewriting started by pid %d",childpid);
+
+        /*
+         * 依次执行：关闭aof定时调度、记录aof重写开始的时间、记录aof重写子进程的pid;
+         */
         server.aof_rewrite_scheduled = 0;
         server.aof_rewrite_time_start = time(NULL);
         server.aof_child_pid = childpid;
@@ -1631,11 +1663,13 @@ int rewriteAppendOnlyFileBackground(void) {
 
 void bgrewriteaofCommand(client *c) {
     if (server.aof_child_pid != -1) {
+        // 当前已经存在AOF重写的子进程
         addReplyError(c,"Background append only file rewriting already in progress");
     } else if (hasActiveChildProcess()) {
+        // 当前存在RDB子进程, 将AOF重写设置为待调度运行
         server.aof_rewrite_scheduled = 1;
         addReplyStatus(c,"Background append only file rewriting scheduled");
-    } else if (rewriteAppendOnlyFileBackground() == C_OK) {
+    } else if (rewriteAppendOnlyFileBackground() == C_OK) { //开始执行AOF重写
         addReplyStatus(c,"Background append only file rewriting started");
     } else {
         addReplyError(c,"Can't execute an AOF background rewriting. "

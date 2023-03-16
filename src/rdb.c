@@ -1,30 +1,13 @@
 /*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
+ * redis用来创建 RDB 文件的函数有三个：
+ * 1) rdbSave(): server服务端在本地磁盘创建 RDB 文件的入口函数, 对应 client 的`save`命令;
+ * 2) rdbSaveBackground(): server服务端通过后台子进程方式在本地磁盘创建 RDB 文件的入口函数, 对应 client 的`bgsave`命令;
+ * 3) rdbSaveToSlavesSockets(): server服务端在主从复制时传输 RDB 文件的入口函数, 对应 server 执行主从复制命令和周期性检测主从复制状态时触发 RDB 生成;
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * RDB 文件的基本组成部分：
+ * ① 文件头：保存 redis 的魔数、RDB版本、redis版本、RDB文件创建时间、键值对占用的内存大小等信息;
+ * ② 文件数据部分：保存了 redis 数据库实际的所有键值对;
+ * ③ 文件尾：保存了 RBD 文件的结束标识符、整个文件的校验值(用于检查文件是否被篡改过);
  */
 
 #include "server.h"
@@ -1016,13 +999,13 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
     int savelru = server.maxmemory_policy & MAXMEMORY_FLAG_LRU;
     int savelfu = server.maxmemory_policy & MAXMEMORY_FLAG_LFU;
 
-    /* Save the expire time */
+    // 写入键值对过期时间标识、对应的过期时间
     if (expiretime != -1) {
         if (rdbSaveType(rdb,RDB_OPCODE_EXPIRETIME_MS) == -1) return -1;
         if (rdbSaveMillisecondTime(rdb,expiretime) == -1) return -1;
     }
 
-    /* Save the LRU info. */
+    //写入LRU空闲时间操作码标识、对应的空闲时间
     if (savelru) {
         uint64_t idletime = estimateObjectIdleTime(val);
         idletime /= 1000; /* Using seconds is enough and requires less space.*/
@@ -1030,7 +1013,7 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
         if (rdbSaveLen(rdb,idletime) == -1) return -1;
     }
 
-    /* Save the LFU info. */
+    //写入LFU访问频率操作码标识、对应的频率信息
     if (savelfu) {
         uint8_t buf[1];
         buf[0] = LFUDecrAndReturn(val);
@@ -1043,9 +1026,9 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
     }
 
     /* Save type, key, value */
-    if (rdbSaveObjectType(rdb,val) == -1) return -1;
-    if (rdbSaveStringObject(rdb,key) == -1) return -1;
-    if (rdbSaveObject(rdb,val,key) == -1) return -1;
+    if (rdbSaveObjectType(rdb,val) == -1) return -1;//写入键值对的类型标识
+    if (rdbSaveStringObject(rdb,key) == -1) return -1;//写入键值对的key
+    if (rdbSaveObject(rdb,val,key) == -1) return -1;//写入键值对的value
 
     /* Delay return if required (for testing) */
     if (server.rdb_key_save_delay)
@@ -1084,7 +1067,13 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     int redis_bits = (sizeof(void*) == 8) ? 64 : 32;
     int aof_preamble = (rdbflags & RDBFLAGS_AOF_PREAMBLE) != 0;
 
-    /* Add a few fields about the state when the RDB was created. */
+    /*
+     * 依次写入：
+     * 1.redis版本信息;
+     * 2.redis运行平台的架构信息;
+     * 3.RDB文件的创建时间;
+     * 4.redis已使用的内存量;
+     */
     if (rdbSaveAuxFieldStrStr(rdb,"redis-ver",REDIS_VERSION) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"redis-bits",redis_bits) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"ctime",time(NULL)) == -1) return -1;
@@ -1160,37 +1149,50 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
+
+    /*
+     * 写入 RDB 文件头
+     */
+
+    // 生成魔数magic
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
+    // 将magic写入RDB文件
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
+    // 写入 redis server 相关的一些属性到文件头
     if (rdbSaveInfoAuxFields(rdb,rdbflags,rsi) == -1) goto werr;
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_BEFORE_RDB) == -1) goto werr;
 
-    for (j = 0; j < server.dbnum; j++) {
+    /*
+     * 写入 RDB 键值对数据
+     */
+
+    for (j = 0; j < server.dbnum; j++) { //循环遍历每一个数据库
         redisDb *db = server.db+j;
         dict *d = db->dict;
         if (dictSize(d) == 0) continue;
         di = dictGetSafeIterator(d);
 
-        /* Write the SELECT DB opcode */
+        // 写入 SELECTDB 操作码和对应的数据库编号.
         if (rdbSaveType(rdb,RDB_OPCODE_SELECTDB) == -1) goto werr;
         if (rdbSaveLen(rdb,j) == -1) goto werr;
 
-        /* Write the RESIZE DB opcode. */
+        // 写入 RESUZEDB 操作码, 用于标识全局哈希表和过期key哈希表中的键值对数量.
         uint64_t db_size, expires_size;
-        db_size = dictSize(db->dict);
-        expires_size = dictSize(db->expires);
-        if (rdbSaveType(rdb,RDB_OPCODE_RESIZEDB) == -1) goto werr;
-        if (rdbSaveLen(rdb,db_size) == -1) goto werr;
-        if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
+        db_size = dictSize(db->dict);         //全局哈希表的大小
+        expires_size = dictSize(db->expires); //过期key哈希表的大小
+        if (rdbSaveType(rdb,RDB_OPCODE_RESIZEDB) == -1) goto werr; //写入RESIZEDB操作码
+        if (rdbSaveLen(rdb,db_size) == -1) goto werr; //写入全局哈希表大小
+        if (rdbSaveLen(rdb,expires_size) == -1) goto werr; //写入过期key哈希表大小
 
-        /* Iterate this DB writing every entry */
+        // 获取数据库中的每一个键值对
         while((de = dictNext(di)) != NULL) {
-            sds keystr = dictGetKey(de);
-            robj key, *o = dictGetVal(de);
+            sds keystr = dictGetKey(de);   //键值对的key
+            robj key, *o = dictGetVal(de); //键值对的value
             long long expire;
 
-            initStaticStringObject(key,keystr);
-            expire = getExpire(db,&key);
+            initStaticStringObject(key,keystr); //为key生成string对象
+            expire = getExpire(db,&key);    //获取键值对的过期时间
+            //将key和value写入RDB文件
             if (rdbSaveKeyValuePair(rdb,&key,o,expire) == -1) goto werr;
 
             /* When this RDB is produced as part of an AOF rewrite, move
@@ -1224,7 +1226,7 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_AFTER_RDB) == -1) goto werr;
 
-    /* EOF opcode */
+    // 写入结束操作码
     if (rdbSaveType(rdb,RDB_OPCODE_EOF) == -1) goto werr;
 
     /* CRC64 checksum. It will be zero if checksum computation is disabled, the
@@ -1252,13 +1254,13 @@ int rdbSaveRioWithEOFMark(rio *rdb, int *error, rdbSaveInfo *rsi) {
     char eofmark[RDB_EOF_MARK_SIZE];
 
     startSaving(RDBFLAGS_REPLICATION);
-    getRandomHexChars(eofmark,RDB_EOF_MARK_SIZE);
+    getRandomHexChars(eofmark,RDB_EOF_MARK_SIZE); //随机生成40字节的16进制字符串, 保存在eofmark中, 宏定义RDB_EOF_MARK_SIZE的值为40
     if (error) *error = 0;
-    if (rioWrite(rdb,"$EOF:",5) == 0) goto werr;
-    if (rioWrite(rdb,eofmark,RDB_EOF_MARK_SIZE) == 0) goto werr;
-    if (rioWrite(rdb,"\r\n",2) == 0) goto werr;
-    if (rdbSaveRio(rdb,error,RDBFLAGS_NONE,rsi) == C_ERR) goto werr;
-    if (rioWrite(rdb,eofmark,RDB_EOF_MARK_SIZE) == 0) goto werr;
+    if (rioWrite(rdb,"$EOF:",5) == 0) goto werr; //写入$EOF
+    if (rioWrite(rdb,eofmark,RDB_EOF_MARK_SIZE) == 0) goto werr; //写入40字节的16进制字符串 eofmark
+    if (rioWrite(rdb,"\r\n",2) == 0) goto werr; //写入转义字符
+    if (rdbSaveRio(rdb,error,RDBFLAGS_NONE,rsi) == C_ERR) goto werr; //生成RDB内容
+    if (rioWrite(rdb,eofmark,RDB_EOF_MARK_SIZE) == 0) goto werr; //再次写入40字节的16进制字符串eofmark
     stopSaving(1);
     return C_OK;
 
