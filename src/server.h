@@ -1037,7 +1037,8 @@ struct clusterState;
 #define CHILD_INFO_TYPE_MODULE 3
 
 /**
- * redis运行所需的各种参数. 对参数的设置会经过三轮, 依次是：
+ * 一个 redisServer 结构体对应一个 redis server 实例.
+ * 它包含了实例运行的相关配置, 对配置的设置会经过三轮, 依次是：
  * 默认配置值 → 命令行启动参数 → 配置文件配置值.
  */
 struct redisServer {
@@ -1328,13 +1329,13 @@ struct redisServer {
     /* Replication (slave) */
     char *masteruser;               /* AUTH with this user and masterauth with master */
     char *masterauth;               /* AUTH with this password with master */
-    char *masterhost;               /* Hostname of master */
-    int masterport;                 /* Port of master */
+    char *masterhost;               /* 主库主机号 */
+    int masterport;                 /* 主库端口号 */
     int repl_timeout;               /* Timeout after N seconds of master idle */
-    client *master;     /* Client that is master for this slave */
+    client *master;        /* 从库上用来和主库连接的客户端 */
     client *cached_master; /* Cached master to be reused for PSYNC. */
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
-    int repl_state;          /* Replication status if the instance is a slave */
+    int repl_state;          /* 从库的复制状态机 */
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */

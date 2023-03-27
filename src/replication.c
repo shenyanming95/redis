@@ -1,34 +1,19 @@
-/* Asynchronous replication implementation.
+/*
+ * Redis 基于状态机的设计思想(只需确认不同状态下具体执行的操作, 以及状态间的跳转条件)
+ * 实现主从复制, 其复制过程涉及三种情况, 四个阶段.
  *
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
+ * 【三种情况】
+ * - 全量复制：传输RDB文件;
+ * - 增量复制：传输主从断连期间的命令;
+ * - 长连接同步：把主节点正常收到的请求传输给从节点;
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
+ * 【四个阶段】
+ * 1) 初始化 :  从节点获取主节点的IP和端口号;
+ * 2) 建立连接: 建立TCP网络连接, 监听I/O读写事件;
+ * 3) 主从握手: 主从节点相互发送PING-PONG消息, 主节点验证从节点：IP、端口、PSYNC 2协议等信息;
+ * 4) 执行阶段: 握手结束, 从节点会给主节点发送 PYSNC 命令, 主节点按照参数确定执行 全量赋值/增量赋值/异常;
  *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
-
-
 #include "server.h"
 #include "cluster.h"
 #include "bio.h"
@@ -1913,18 +1898,28 @@ char *sendSynchronousCommand(int flags, connection *conn, ...) {
 #define PSYNC_FULLRESYNC 3
 #define PSYNC_NOT_SUPPORTED 4
 #define PSYNC_TRY_LATER 5
+
+/**
+ * 负责向主库发送数据同步的命令, 主库收到命令后, 会根据从库发送的主库 ID、复制进度值 offset.
+ * 来判断是进行全量复制还是增量复制, 或者是返回错误.
+ *
+ * @param conn
+ * @param read_reply
+ * @return
+ */
 int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     char *psync_replid;
     char psync_offset[32];
     sds reply;
 
-    /* Writing half */
+    // 发送 PSYNC 命令
     if (!read_reply) {
         /* Initially set master_initial_offset to -1 to mark the current
          * master run_id and offset as not valid. Later if we'll be able to do
          * a FULL resync using the PSYNC command we'll set the offset at the
          * right value, so that this information will be propagated to the
          * client structure representing the master into server.master. */
+        // 从库第一次和主库同步时, 设置offset为-1
         server.master_initial_offset = -1;
 
         if (server.cached_master) {
@@ -1937,7 +1932,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
             memcpy(psync_offset,"-1",3);
         }
 
-        /* Issue the PSYNC command */
+        // 调用sendSynchronousCommand发送PSYNC命令
         reply = sendSynchronousCommand(SYNC_CMD_WRITE,conn,"PSYNC",psync_replid,psync_offset,NULL);
         if (reply != NULL) {
             serverLog(LL_WARNING,"Unable to send PSYNC to master: %s",reply);
@@ -1945,10 +1940,11 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
             connSetReadHandler(conn, NULL);
             return PSYNC_WRITE_ERROR;
         }
+        // 发送命令后, 等待主库响应
         return PSYNC_WAIT_REPLY;
     }
 
-    /* Reading half */
+    // 读取主库的响应
     reply = sendSynchronousCommand(SYNC_CMD_READ,conn,NULL);
     if (sdslen(reply) == 0) {
         /* The master may send empty newlines after it receives PSYNC
@@ -1959,6 +1955,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
 
     connSetReadHandler(conn, NULL);
 
+    // 主库返回FULLRESYNC, 执行全量复制
     if (!strncmp(reply,"+FULLRESYNC",11)) {
         char *replid = NULL, *offset = NULL;
 
@@ -1992,6 +1989,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
         return PSYNC_FULLRESYNC;
     }
 
+    // 主库返回CONTINUE, 执行增量复制
     if (!strncmp(reply,"+CONTINUE",9)) {
         /* Partial resync was accepted. */
         serverLog(LL_NOTICE,
@@ -2057,6 +2055,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
         return PSYNC_TRY_LATER;
     }
 
+    // 主库返回错误信息
     if (strncmp(reply,"-ERR",4)) {
         /* If it's not an error, log the unexpected event. */
         serverLog(LL_WARNING,
@@ -2071,8 +2070,11 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     return PSYNC_NOT_SUPPORTED;
 }
 
-/* This handler fires when the non blocking connect was able to
- * establish a connection with the master. */
+/**
+ * 主库和从库连接一旦有读写事件发生, 就会回调此方法.
+ *
+ * @param conn
+ */
 void syncWithMaster(connection *conn) {
     char tmpfile[256], *err = NULL;
     int dfd = -1, maxtries = 5;
@@ -2093,7 +2095,8 @@ void syncWithMaster(connection *conn) {
         goto error;
     }
 
-    /* Send a PING to check the master is able to reply without errors. */
+    // 如果从库刚和主库创建完连接, 就会执行下面的if语句
+    // 从库会向主库发送 PING 消息, 同时将从库状态设置为 PONG.
     if (server.repl_state == REPL_STATE_CONNECTING) {
         serverLog(LL_NOTICE,"Non blocking connect for SYNC fired the event.");
         /* Delete the writable event so that the readable event remains
@@ -2107,6 +2110,15 @@ void syncWithMaster(connection *conn) {
         if (err) goto write_error;
         return;
     }
+
+    /**
+     * 下面代码的几个操作, 对应着依次给主库发送验证信息、端口号、IP、对 RDB 文件和无盘复制的支持情况;
+     * 每一次的握手通信发送消息时, 会对应从库的一组状态变迁. 例如：
+     * 1) 发送验证信息:  REPL_STATE_SEND_AUTH => REPL_STATE_RECEIVE_AUTH
+     * 2) 发送端口号:   REPL_STATE_SEND_PORT => REPL_STATE_RECEIVE_PORT
+     * 3) 发送ip地址:   REPL_STATE_SEND_IP => REPL_STATE_RECEIVE_IP
+     * 4) 发送复制信息:  REPL_STATE_SEND_CAPA => REPL_STATE_RECEIVE_CAPA
+     */
 
     /* Receive the PONG command. */
     if (server.repl_state == REPL_STATE_RECEIVE_PONG) {
@@ -2256,6 +2268,7 @@ void syncWithMaster(connection *conn) {
      * to start a full resynchronization so that we get the master run id
      * and the global offset, to try a partial resync at the next
      * reconnection attempt. */
+    // 从库状态机变迁为REPL_STATE_SEND_PSYNC后, 开始调用slaveTryPartialResynchronization函数向主库发送PSYNC命令, 进行数据同步
     if (server.repl_state == REPL_STATE_SEND_PSYNC) {
         if (slaveTryPartialResynchronization(conn,0) == PSYNC_WRITE_ERROR) {
             err = sdsnew("Write error sending the PSYNC command.");
@@ -2273,7 +2286,9 @@ void syncWithMaster(connection *conn) {
         goto error;
     }
 
+    // 读取PSYNC命令的返回结果
     psync_result = slaveTryPartialResynchronization(conn,1);
+    // PSYNC结果还没有返回, 先从syncWithMaster函数返回处理其他操作
     if (psync_result == PSYNC_WAIT_REPLY) return; /* Try again later... */
 
     /* If the master is in an transient error, we should try to PSYNC
@@ -2284,7 +2299,7 @@ void syncWithMaster(connection *conn) {
 
     /* Note: if PSYNC does not return WAIT_REPLY, it will take care of
      * uninstalling the read handler from the file descriptor. */
-
+    // 如果PSYNC结果是PSYNC_CONTINUE, 从syncWithMaster函数返回, 后续执行增量复制
     if (psync_result == PSYNC_CONTINUE) {
         serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Master accepted a Partial Resynchronization.");
         if (server.supervised_mode == SUPERVISED_SYSTEMD) {
@@ -2330,10 +2345,8 @@ void syncWithMaster(connection *conn) {
         server.repl_transfer_fd = dfd;
     }
 
-    /* Setup the non blocking download of the bulk file. */
-    if (connSetReadHandler(conn, readSyncBulkPayload)
-            == C_ERR)
-    {
+    // 如果执行全量复制的话, 针对连接上的读事件, 创建readSyncBulkPayload回调函数
+    if (connSetReadHandler(conn, readSyncBulkPayload) == C_ERR){
         char conninfo[CONN_INFO_LEN];
         serverLog(LL_WARNING,
             "Can't create readable event for SYNC: %s (%s)",
@@ -2369,17 +2382,17 @@ write_error: /* Handle sendSynchronousCommand(SYNC_CMD_WRITE) errors. */
 
 int connectWithMaster(void) {
     server.repl_transfer_s = server.tls_replication ? connCreateTLS() : connCreateSocket();
+    // 实际通过 anetTcpNonBlockBestEffortBindConnect() 方法和主库建立 Socket 连接.
+    // 在连接上注册读写事情, 对应的处理函数为：syncWithMaster
     if (connConnect(server.repl_transfer_s, server.masterhost, server.masterport,
                 NET_FIRST_BIND_ADDR, syncWithMaster) == C_ERR) {
-        serverLog(LL_WARNING,"Unable to connect to MASTER: %s",
-                connGetLastError(server.repl_transfer_s));
+        serverLog(LL_WARNING,"Unable to connect to MASTER: %s", connGetLastError(server.repl_transfer_s));
         connClose(server.repl_transfer_s);
         server.repl_transfer_s = NULL;
         return C_ERR;
     }
-
-
     server.repl_transfer_lastio = server.unixtime;
+    // 与 master 连接完后, 从库状态设置为 REPL_STATE_CONNECTING
     server.repl_state = REPL_STATE_CONNECTING;
     return C_OK;
 }
@@ -2578,8 +2591,7 @@ void replicaofCommand(client *c) {
                                  "master\r\n"));
             return;
         }
-        /* There was no previous master or the user specified a different one,
-         * we can continue. */
+        /* 若没有记录主库的IP和端口号, 设置主库的信息 */
         replicationSetMaster(c->argv[1]->ptr, port);
         sds client = catClientInfoString(sdsempty(),c);
         serverLog(LL_NOTICE,"REPLICAOF %s:%d enabled (user request from '%s')",
@@ -3097,6 +3109,7 @@ long long replicationGetSlaveOffset(void) {
 /* --------------------------- REPLICATION CRON  ---------------------------- */
 
 /* Replication cron function, called 1 time per second. */
+/* redis 根据不同的主从复制状态即repl_state, 来执行不同的逻辑  */
 void replicationCron(void) {
     static long long replication_cron_loops = 0;
 
@@ -3126,10 +3139,9 @@ void replicationCron(void) {
         freeClient(server.master);
     }
 
-    /* Check if we should connect to a MASTER */
+    /* 如果从库实例为 REPL_STATE_CONNECT 状态, 调用方法 connectWithMaster() 和主库建立连接 */
     if (server.repl_state == REPL_STATE_CONNECT) {
-        serverLog(LL_NOTICE,"Connecting to MASTER %s:%d",
-            server.masterhost, server.masterport);
+        serverLog(LL_NOTICE,"Connecting to MASTER %s:%d", server.masterhost, server.masterport);
         if (connectWithMaster() == C_OK) {
             serverLog(LL_NOTICE,"MASTER <-> REPLICA sync started");
         }
