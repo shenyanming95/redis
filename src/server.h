@@ -1,3 +1,7 @@
+/*
+ * Redis 全局命令表: redisCommandTable
+ */
+
 #ifndef __REDIS_H
 #define __REDIS_H
 
@@ -1408,7 +1412,7 @@ struct redisServer {
     mstime_t mstime;            /* 'unixtime' in milliseconds. */
     ustime_t ustime;            /* 'unixtime' in microseconds. */
     /* Pubsub */
-    dict *pubsub_channels;  /* Map channels to list of subscribed clients */
+    dict *pubsub_channels;  /* key-频道的名称, value 为订阅频道的客户端 */
     list *pubsub_patterns;  /* A list of pubsub_patterns */
     dict *pubsub_patterns_dict;  /* A dict of pubsub_patterns */
     int notify_keyspace_events; /* Events to propagate via Pub/Sub. This is an

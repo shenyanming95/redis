@@ -6,7 +6,20 @@
  * 并不是 Leader 和 Follower 的关系, 而是对等的关系. 只有当哨兵发现
  * 主节点故障了, 此时哨兵才会按照 Raft 协议执行选举 Leader 的流程.
  *
+ * 哨兵在工作过程中, 是通过pub/sub实现交互的, 会在一些事件节点上使用
+ * sentinelEvent 函数往不同的频道上发布消息, 主要的频道有：
+ * 1) +sdown: 表示哨兵判断主节点主观下线;
+ * 2) +odown: 表示哨兵判断主节点客观下线;
+ * 3) +new-epoch: 表示当前的纪元被更新, 进入新的纪元;
+ * 4) +try-failover: 表示达到故障切换的条件, 开始故障切换;
+ * 5) +failover-state-select-slave: 表示开始要选一个从节点作为新的主节点;
+ * 6) +selected-slave: 找到一个合适的从节点作为新的主节点;
+ * 7) +failover-end: 故障切换成功完成;
+ * 8) +switch-master: 主节点发生切换, 主节点的信息发生替换;
+ *
+ * ================================================================
  * 哨兵的时间事件处理函数: sentinelTimer();
+ * 哨兵间发布/订阅消息的处理函数: sentinelEvent();
  */
 
 #include "server.h"
@@ -614,9 +627,15 @@ int sentinelAddrIsEqual(sentinelAddr *a, sentinelAddr *b) {
  *
  *  Any other specifier after "%@" is processed by printf itself.
  */
-// 向被监听的主节点发送事件信息, 从而开始监听主节点.
-// level 表示日志级别; type 表示发送事件信息所用的频道; ri表示对应交互的主节点; fmt表示发送的消息内容
+// level 表示日志级别; type 表示发送事件信息所用的频道; ri表示对应交互的主节点; fmt表示发送的消息内容; 后续还定义了一个可变参数.
 void sentinelEvent(int level, char *type, sentinelRedisInstance *ri, const char *fmt, ...) {
+    /*
+     * 关于 C 语言对于可变参数的使用:
+     * 1) 定义一个 va_list 变量, 该变量用来指向可变参数的指针;
+     * 2) 通过 va_start 宏获取可变参数. 它需要两个参数: 一个是第1步定义的va_list变量, 另一个是可变参数的前一个参数, 在本函数中就是 fmt 变量.
+     * 3) 使用 vsnprintf 函数, 按照 fmt 定义的格式, 打印可变参数中的内容. vsnprintf会逐个获取可变参数中的每一个参数进行打印.
+     * 4) 调用 va_end 宏将刚才创建的 ap 指针关闭.
+     */
     va_list ap;
     char msg[LOG_MAX_LEN];
     robj *channel, *payload;
@@ -2113,8 +2132,10 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
                     sentinelDisconnectCallback);
             sentinelSendAuthIfNeeded(ri,link->pc);
             sentinelSetClientName(ri,link->pc,"pubsub");
-            /* Now we subscribe to the Sentinels "Hello" channel. */
+
+            // 向主节点发送 subscribe 命令, 订阅通道: __sentinel__:hello(宏定义)
             retval = redisAsyncCommand(link->pc,
+                // 当在"__sentinel__:hello"频道上收到 hello 消息后, 回调 sentinelReceiveHelloMessages 函数来进行处理
                 sentinelReceiveHelloMessages, ri, "%s %s",
                 sentinelInstanceMapCommand(ri,"SUBSCRIBE"),
                 SENTINEL_HELLO_CHANNEL);
@@ -2481,10 +2502,10 @@ void sentinelPublishReplyCallback(redisAsyncContext *c, void *reply, void *privd
 }
 
 /* Process an hello message received via Pub/Sub in master or slave instance,
- * or sent directly to this sentinel via the (fake) PUBLISH command of Sentinel.
- *
- * If the master name specified in the message is not known, the message is
- * discarded. */
+ * or sent directly to this sentinel via the (fake) PUBLISH command of Sentinel.*/
+// 从 hello 消息中获得发布 hello 消息的哨兵实例的基本信息, 比如 IP、端口号、quorum 阈值等.
+// 如果当前哨兵并没有记录发布 hello 消息的哨兵实例的信息, 那么 sentinelProcessHelloMessage 函数就会调用 createSentinelRedisInstance 函数，
+// 来创建发布 hello 消息的哨兵实例的信息记录，这样依赖, 当前哨兵就拥有了其他哨兵实例的信息.
 void sentinelProcessHelloMessage(char *hello, int hello_len) {
     /* Format is composed of 8 tokens:
      * 0=ip,1=port,2=runid,3=current_epoch,4=master_name,
@@ -2614,6 +2635,7 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
     /* We are not interested in meeting ourselves */
     if (strstr(r->element[2]->str,sentinel.myid) != NULL) return;
 
+    // 处理 hello 消息
     sentinelProcessHelloMessage(r->element[2]->str, r->element[2]->len);
 }
 
@@ -2654,13 +2676,14 @@ int sentinelSendHello(sentinelRedisInstance *ri) {
 
     /* Format and send the Hello message. */
     snprintf(payload,sizeof(payload),
-        "%s,%d,%s,%llu," /* Info about this sentinel. */
-        "%s,%s,%d,%llu", /* Info about current master. */
+        "%s,%d,%s,%llu," /* 当前哨兵实例的信息, 包括ip、端口号、ID和当前纪元 */
+        "%s,%s,%d,%llu", /* 当前主节点的信息, 包括名称、IP、端口号和纪元 */
         announce_ip, announce_port, sentinel.myid,
         (unsigned long long) sentinel.current_epoch,
         /* --- */
         master->name,master_addr->ip,master_addr->port,
         (unsigned long long) master->config_epoch);
+    // 向主节点的hello频道发布hello消息
     retval = redisAsyncCommand(ri->link->cc,
         sentinelPublishReplyCallback, ri, "%s %s %s",
         sentinelInstanceMapCommand(ri,"PUBLISH"),
@@ -3058,6 +3081,7 @@ int sentinelIsQuorumReachable(sentinelRedisInstance *master, int *usableptr) {
 }
 
 /**
+ * sentinel 命令处理函数.
  * 哨兵对于 sentinel 开头的命令, 都会在这个函数中处理.
  * 它会根据 sentinel 命令后面的不同子命令, 执行不同的分支.
  */
@@ -3132,9 +3156,10 @@ void sentinelCommand(client *c) {
                                     (ri->flags & SRI_MASTER))
             isdown = 1;
 
-        /* Vote for the master (or fetch the previous vote) if the request
-         * includes a runid, otherwise the sender is not seeking for a vote. */
+        // 当前实例为主节点, 并且sentinel命令的实例ID不等于*号
         if (ri && ri->flags & SRI_MASTER && strcasecmp(c->argv[5]->ptr,"*")) {
+            // 调用sentinelVoteLeader进行哨兵 Leader 选举.
+            // 注意这个函数是在收到"is-master-down-by-addr"命令后执行的, 因此它是在当前哨兵B的角度, 处理哨兵A的请求(A是发出命令的哨兵)
             leader = sentinelVoteLeader(ri,(uint64_t)req_epoch,
                                             c->argv[5]->ptr,
                                             &leader_epoch);
@@ -3747,6 +3772,14 @@ void sentinelCheckObjectivelyDown(sentinelRedisInstance *master) {
         // 遍历监听同一主节点的其它哨兵, 判断它们是否也认为该主节点下线, 若是则quorum+=1
         while((de = dictNext(di)) != NULL) {
             sentinelRedisInstance *ri = dictGetVal(de);
+            /*
+             * 这里可能会有个疑问, 按照每个哨兵的逻辑:
+             * 1) 在函数sentinelCheckSubjectivelyDown()中, 如果当前哨兵判断主节点为"主观下线", 会将其 flags 标识为：SRI_S_DOWN.
+             * 2) 为啥在当前函数sentinelCheckObjectivelyDown(), 判断"客观下线"却是校验每个哨兵的flags的标识是否为: SRI_MASTER_DOWN.
+             * 3) 这是因为当前哨兵发现主节点主观下线后, 会调用 sentinelAskMasterStateToOtherSentinels() 函数向其它哨兵发送 "sentinel is-master-down-by-addr"命令.
+             * 4) 其它哨兵收到此命令后会对主节点做逻辑判断, 并且响应这个命令
+             * 5) 当前哨兵收到其它哨兵的响应后, 会回调函数 sentinelReceiveIsMasterDownReply(), 这里面会把判断主节点下线的哨兵的 flags 标识为: SRI_MASTER_DOWN.
+             */
             if (ri->flags & SRI_MASTER_DOWN) quorum++;
         }
         dictReleaseIterator(di);
@@ -3774,8 +3807,24 @@ void sentinelCheckObjectivelyDown(sentinelRedisInstance *master) {
     }
 }
 
-/* Receive the SENTINEL is-master-down-by-addr reply, see the
- * sentinelAskMasterStateToOtherSentinels() function for more information. */
+/**
+ * 发送 "SENTINEL is-master-down-by-addr" 命令收到响应后的处理函数.
+ * 对应的发送命令的函数为: sentinelAskMasterStateToOtherSentinels().
+ *
+ * 它会判断其它哨兵的回复结果, 其结果包含：
+ * 1) 哨兵对主节点主观下线的判断结果
+ * 2) 哨兵 Leader 的 ID
+ * 3) 哨兵 Leader 所属的纪元
+ *
+ * 这个函数会检查第一步, 如果对应的哨兵已经判断主节点为主观下线, 那么收到命令回复的当前哨兵,
+ * 就会把自己记录的对应哨兵的flags, 设置为: SRI_MASTER_DOWN. 这样, 后续在
+ * sentinelCheckObjectivelyDown()函数, 就可以遍历监听同一个主节点的其它哨兵的flags标识,
+ * 来判断主节点是否客观下线.
+ *
+ * @param c     命令上下文
+ * @param reply 当前哨兵收到的其它哨兵的命令响应结果
+ * @param privdata 主节点
+ */
 void sentinelReceiveIsMasterDownReply(redisAsyncContext *c, void *reply, void *privdata) {
     sentinelRedisInstance *ri = privdata;
     instanceLink *link = c->data;
@@ -3788,12 +3837,15 @@ void sentinelReceiveIsMasterDownReply(redisAsyncContext *c, void *reply, void *p
     /* Ignore every error or unexpected reply.
      * Note that if the command returns an error for any reason we'll
      * end clearing the SRI_MASTER_DOWN flag for timeout anyway. */
+    // 如果返回结果包含三部分内容, 并且第一，二，三部分内容的类型分别是整数、字符串和整数.
+    // 对应的响应内容是: 对主节点下线的主观判断结果、其它哨兵 Leader 的 ID、其它哨兵的所属纪元.
     if (r->type == REDIS_REPLY_ARRAY && r->elements == 3 &&
         r->element[0]->type == REDIS_REPLY_INTEGER &&
         r->element[1]->type == REDIS_REPLY_STRING &&
         r->element[2]->type == REDIS_REPLY_INTEGER)
     {
         ri->last_master_down_reply_time = mstime();
+        // 如果返回结果第一部分的值为1, 则在对应哨兵的flags中设置SRI_MASTER_DOWN标记.
         if (r->element[0]->integer == 1) {
             ri->flags |= SRI_MASTER_DOWN;
         } else {
@@ -3818,7 +3870,7 @@ void sentinelReceiveIsMasterDownReply(redisAsyncContext *c, void *reply, void *p
  * SENTINEL IS-MASTER-DOWN-BY-ADDR requests to other sentinels
  * in order to get the replies that allow to reach the quorum
  * needed to mark the master in ODOWN state and trigger a failover. */
-// 向监听同一主节点的其他哨兵发送 is-master-down-by-addr 命令, 进而询问其他哨兵对主节点的状态判断.
+// 向监听同一主节点的其他哨兵发送 is-master-down-by-addr 命令, 进而询问其他哨兵对主节点的状态判断.(并获取它们的哨兵leader投票结果)
 #define SENTINEL_ASK_FORCED (1<<0)
 void sentinelAskMasterStateToOtherSentinels(sentinelRedisInstance *master, int flags) {
     dictIterator *di;
@@ -3878,21 +3930,29 @@ void sentinelSimFailureCrash(void) {
     exit(99);
 }
 
-/* Vote for the sentinel with 'req_runid' or return the old vote if already
- * voted for the specified 'req_epoch' or one greater.
+/**
+ * 当前哨兵（B）收到其它哨兵(A)发来的"sentinel is-master-down-by-addr"命令, 而作出的投票反馈.
  *
- * If a vote is not available returns NULL, otherwise return the Sentinel
- * runid and populate the leader_epoch with the epoch of the vote. */
+ * @param master    发生问题的主节点
+ * @param req_epoch 其它哨兵(A)的纪元
+ * @param req_runid 其它哨兵(A)的 ID
+ * @param leader_epoch leader的纪元
+ * @return leader的 ID
+ */
 char *sentinelVoteLeader(sentinelRedisInstance *master, uint64_t req_epoch, char *req_runid, uint64_t *leader_epoch) {
+    // 如果其它哨兵（A）的纪元大于当前哨兵（B）的纪元, 那么就更新当前哨兵的纪元.
     if (req_epoch > sentinel.current_epoch) {
         sentinel.current_epoch = req_epoch;
         sentinelFlushConfig();
         sentinelEvent(LL_WARNING,"+new-epoch",master,"%llu",
             (unsigned long long) sentinel.current_epoch);
     }
-
-    if (master->leader_epoch < req_epoch && sentinel.current_epoch <= req_epoch)
-    {
+    /*
+     * 当前哨兵B投票给其它哨兵A的条件是：
+     * master记录的 Leader 的纪元小于哨兵A的纪元, 同时, 哨兵A的纪元要大于等于哨兵B的纪元. 这样哨兵B就会投票给哨兵A.
+     * 如果不满足上诉的两个条件, 哨兵B就直接返回当前master中记录的 Leader ID, 这个就是哨兵B之前投票后保留的结果.
+     */
+    if (master->leader_epoch < req_epoch && sentinel.current_epoch <= req_epoch) {
         sdsfree(master->leader);
         master->leader = sdsnew(req_runid);
         master->leader_epoch = sentinel.current_epoch;
@@ -3905,7 +3965,6 @@ char *sentinelVoteLeader(sentinelRedisInstance *master, uint64_t req_epoch, char
         if (strcasecmp(master->leader,sentinel.myid))
             master->failover_start_time = mstime()+rand()%SENTINEL_MAX_DESYNC;
     }
-
     *leader_epoch = master->leader_epoch;
     return master->leader ? sdsnew(master->leader) : NULL;
 }
@@ -3943,16 +4002,19 @@ char *sentinelGetLeader(sentinelRedisInstance *master, uint64_t epoch) {
     dict *counters;
     dictIterator *di;
     dictEntry *de;
+    // voters是所有哨兵的个数(包括自己)
     unsigned int voters = 0, voters_quorum;
     char *myvote;
     char *winner = NULL;
     uint64_t leader_epoch;
+    // max_votes是获得的票数
     uint64_t max_votes = 0;
 
     serverAssert(master->flags & (SRI_O_DOWN|SRI_FAILOVER_IN_PROGRESS));
     counters = dictCreate(&leaderVotesDictType,NULL);
 
-    voters = dictSize(master->sentinels)+1; /* All the other sentinels and me.*/
+    /* All the other sentinels and me.*/
+    voters = dictSize(master->sentinels)+1;
 
     /* Count other sentinels votes */
     di = dictGetIterator(master->sentinels);
@@ -3993,11 +4055,12 @@ char *sentinelGetLeader(sentinelRedisInstance *master, uint64_t epoch) {
             winner = myvote;
         }
     }
-
+    // 赞成票的数量必须是超过半数以上的哨兵个数.
     voters_quorum = voters/2+1;
+    // 如果赞成票数不到半数的哨兵个数或者少于quorum阈值, 那么 Leader 就为 NULL.
     if (winner && (max_votes < voters_quorum || max_votes < master->quorum))
         winner = NULL;
-
+    // 否则确定最终的 Leader
     winner = winner ? sdsnew(winner) : NULL;
     sdsfree(myvote);
     dictRelease(counters);
@@ -4082,9 +4145,11 @@ int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port) {
 /* Setup the master state to start a failover. */
 void sentinelStartFailover(sentinelRedisInstance *master) {
     serverAssert(master->flags & SRI_MASTER);
-
+    // 设置故障转移标识, 表示已经开始failover.
+    // 一旦 failover_state 被设置成了 SENTINEL_FAILOVER_STATE_WAIT_START 状态, sentinelFailoverStateMachine() 函数就会开始执行.
     master->failover_state = SENTINEL_FAILOVER_STATE_WAIT_START;
     master->flags |= SRI_FAILOVER_IN_PROGRESS;
+
     master->failover_epoch = ++sentinel.current_epoch;
     sentinelEvent(LL_WARNING,"+new-epoch",master,"%llu",
         (unsigned long long) sentinel.current_epoch);
@@ -4093,17 +4158,15 @@ void sentinelStartFailover(sentinelRedisInstance *master) {
     master->failover_state_change_time = mstime();
 }
 
-/* This function checks if there are the conditions to start the failover,
- * that is:
+/**
+ * 判断是否要进行故障切换, 条件有三(都要满足):
+ * 1) 主节点的 flags 已经标记了 SRI_O_DOWN
+ * 2) 当前没有在执行故障切换
+ * 3) 如果已经开始故障转移, 那么开始时间距离当前时间, 需要超过 sentinel.conf 文件中的 sentinel failover-timeout 配置项的 2 倍.
  *
- * 1) Master must be in ODOWN condition.
- * 2) No failover already in progress.
- * 3) No failover already attempted recently.
- *
- * We still don't know if we'll win the election so it is possible that we
- * start the failover but that we'll not be able to act.
- *
- * Return non-zero if a failover was started. */
+ * @param master
+ * @return 0-不需要启动故障转移, 非0表示需要启动.
+ */
 int sentinelStartFailoverIfNeeded(sentinelRedisInstance *master) {
     /* We can't failover if the master is not in O_DOWN state. */
     if (!(master->flags & SRI_O_DOWN)) return 0;
@@ -4129,7 +4192,7 @@ int sentinelStartFailoverIfNeeded(sentinelRedisInstance *master) {
         }
         return 0;
     }
-
+    // 上述三个条件都满足后, 调用 sentinelStartFailover() 函数启动故障转移
     sentinelStartFailover(master);
     return 1;
 }
@@ -4243,7 +4306,11 @@ void sentinelFailoverWaitStart(sentinelRedisInstance *ri) {
     char *leader;
     int isleader;
 
-    /* Check if we are the leader for the failover epoch. */
+    /*
+     * 调用 sentinelGetLeader() 函数, 判断发起投票的哨兵是否可以成为哨兵 Leader. 判断条件为两个:
+     * 1) 获得超过半数的其它哨兵的赞成票;
+     * 2) 获得超过预设的 quorum 阈值的赞成票数;
+     */
     leader = sentinelGetLeader(ri, ri->failover_epoch);
     isleader = leader && strcasecmp(leader,sentinel.myid) == 0;
     sdsfree(leader);
@@ -4468,10 +4535,11 @@ void sentinelFailoverSwitchToPromotedSlave(sentinelRedisInstance *master) {
 
 void sentinelFailoverStateMachine(sentinelRedisInstance *ri) {
     serverAssert(ri->flags & SRI_MASTER);
-
+    // 状态判断, 如果当前不是故障转移状态, 方法返回.
     if (!(ri->flags & SRI_FAILOVER_IN_PROGRESS)) return;
-
+    // 根据故障状态, 执行不同的逻辑分支.
     switch(ri->failover_state) {
+        // 主节点真的发生故障了, 那么调用sentinelFailoverWaitStart()函数执行故障切换
         case SENTINEL_FAILOVER_STATE_WAIT_START:
             sentinelFailoverWaitStart(ri);
             break;
@@ -4526,7 +4594,7 @@ void sentinelAbortFailover(sentinelRedisInstance *ri) {
  *    d.再次调用 sentinelAskMasterStateToOtherSentinels 函数, 获取其它哨兵实例对主节点状态的判断.
  * ======================================================================================================================
  * 注意: 由于 sentinelRedisInstance 结构可以表示主节点、从节点和哨兵实例, 所以上述的四个大步骤的1)、2)、3)都会对主节点、从节点和哨兵实例执行,
- *      而第四步只有在处理主节点时才会执行.
+ *      而第4步只有在处理主节点时才会执行.
  *
  * @param ri sentinelRedisInstance 结构可以表示主节点、从节点和哨兵实例.
  */
@@ -4560,7 +4628,9 @@ void sentinelHandleRedisInstance(sentinelRedisInstance *ri) {
         // 综合这些判断, 作出主节点客观下线的最终判断.
         sentinelCheckObjectivelyDown(ri);
         if (sentinelStartFailoverIfNeeded(ri))
+            // 调用 sentinelAskMasterStateToOtherSentinels 函数, 咨询其它哨兵对该主节点主观下线的判断, 同时获取投票结果.
             sentinelAskMasterStateToOtherSentinels(ri,SENTINEL_ASK_FORCED);
+        // 开始执行故障切换.
         sentinelFailoverStateMachine(ri);
         sentinelAskMasterStateToOtherSentinels(ri,SENTINEL_NO_FLAGS);
     }
