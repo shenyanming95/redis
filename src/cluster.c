@@ -1,31 +1,12 @@
-/* Redis Cluster implementation.
+/*
+ * 使用Gossip协议的集群, 每个集群节点都会维护一份集群的状态信息, 对于redis来说:
+ * 1.集群节点的信息: 节点名称、IP、端口号;
+ * 2.运行状态: 节点向其它节点发送PING消息的时间、收到其它节点返回的PONG消息的时间;
+ * 3.数据在节点间的分布: slots的分配情况
  *
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Gossip协议通过“随机挑选通信节点”的方式, 让节点信息在整个集群中传播:
+ * 节点会以一定的频率从集群中随机挑选一些其他节点, 把自身的信息和已知的其他节点信息, 用 PING 消息发送给选出的节点;
+ * 而其他节点收到 PING 消息后, 也会把自己的信息和已知的其他节点信息, 用 PONG 消息返回给发送节点.
  */
 
 #include "server.h"
@@ -2430,6 +2411,16 @@ void clusterSetGossipEntry(clusterMsg *hdr, int i, clusterNode *n) {
 
 /* Send a PING or PONG packet to the specified node, making sure to add enough
  * gossip informations. */
+/**
+ * 向指定集群其它节点发送PING或者PONG消息.
+ * 这个函数的主要逻辑分为三步:
+ * 1) 构建PING消息头;
+ * 2) 构建PING消息体;
+ * 3) 发送消息;
+ *
+ * @param link
+ * @param type
+ */
 void clusterSendPing(clusterLink *link, int type) {
     unsigned char *buf;
     clusterMsg *hdr;
@@ -2489,11 +2480,18 @@ void clusterSendPing(clusterLink *link, int type) {
 
     /* Populate the header. */
     if (link->node && type == CLUSTERMSG_TYPE_PING)
+        // 如果是PING消息, 记录当前发送的时间
         link->node->ping_sent = mstime();
+    // 构建PING消息头
     clusterBuildMessageHdr(hdr,type);
 
     /* Populate the gossip fields */
     int maxiterations = wanted*3;
+    // 构建PING消息体时, 会将多个节点的信息写入PING消息, 具体写入多少个, 由三个参数控制：
+    // 1.freshnodes: 等于集群节点减2;
+    // 2.wanted: 默认集群节点数的1/10, 最小等于3, 最大不超过freshnodes值;
+    // 3.maxiterations: 等于wanted * 3;
+    // 在循环中, 每次从集群节点随机选择一个节点出来, 排除掉有故障的、正在握手的、失联的、没有地址信息的节点, 将其填充到消息体
     while(freshnodes > 0 && gossipcount < wanted && maxiterations--) {
         dictEntry *de = dictGetRandomKey(server.cluster->nodes);
         clusterNode *this = dictGetVal(de);
@@ -2520,7 +2518,7 @@ void clusterSendPing(clusterLink *link, int type) {
         /* Do not add a node we already have. */
         if (clusterNodeIsInGossipSection(hdr,gossipcount,this)) continue;
 
-        /* Add it */
+        // 设置相应的 Ping 消息体, 即clusterMsgDataGossip
         clusterSetGossipEntry(hdr,gossipcount,this);
         freshnodes--;
         gossipcount++;
@@ -2554,6 +2552,7 @@ void clusterSendPing(clusterLink *link, int type) {
     totlen += (sizeof(clusterMsgDataGossip)*gossipcount);
     hdr->count = htons(gossipcount);
     hdr->totlen = htonl(totlen);
+    // 将PING消息发送给随机选出的目标节点.
     clusterSendMessage(link,buf,totlen);
     zfree(buf);
 }
@@ -3490,26 +3489,29 @@ void clusterCron(void) {
     }
     dictReleaseIterator(di);
 
-    /* Ping some random node 1 time every 10 iterations, so that we usually ping
-     * one random node every second. */
+    // clusterCron函数每执行10次, 随机选取一个节点发送ping消息.
+    // 而该函数每1s调用10次, 相当于集群节点每一秒向一个随机节点发送Gossip协议的ping消息.
     if (!(iteration % 10)) {
         int j;
 
-        /* Check a few random nodes and ping the one with the oldest
-         * pong_received time. */
+        // 随机选择5个集群节点, 遴选出最早向本节点发送Pong消息的对应节点,
+        // 向其发送Ping消息.
         for (j = 0; j < 5; j++) {
             de = dictGetRandomKey(server.cluster->nodes);
             clusterNode *this = dictGetVal(de);
 
             /* Don't ping nodes disconnected or with a ping currently active. */
+            // 不会向 断连的节点、和当前节点正在握手的节点 发送Ping消息
             if (this->link == NULL || this->ping_sent != 0) continue;
             if (this->flags & (CLUSTER_NODE_MYSELF|CLUSTER_NODE_HANDSHAKE))
                 continue;
+            // 遴选向当前节点发送Pong消息最早的节点
             if (min_pong_node == NULL || min_pong > this->pong_received) {
                 min_pong_node = this;
                 min_pong = this->pong_received;
             }
         }
+        // 选择合适的节点以后, 调用 clusterSendPing 函数向其发送Ping消息
         if (min_pong_node) {
             serverLog(LL_DEBUG,"Pinging node %.40s", min_pong_node->name);
             clusterSendPing(min_pong_node->link, CLUSTERMSG_TYPE_PING);

@@ -1,3 +1,14 @@
+/*
+ * 使用Gossip协议的集群, 每个集群节点都会维护一份集群的状态信息, 对于redis来说:
+ * 1.集群节点的信息: 节点名称、IP、端口号;
+ * 2.运行状态: 节点向其它节点发送PING消息的时间、收到其它节点返回的PONG消息的时间;
+ * 3.数据在节点间的分布: slots的分配情况
+ *
+ * Gossip协议通过“随机挑选通信节点”的方式, 让节点信息在整个集群中传播:
+ * 节点会以一定的频率从集群中随机挑选一些其他节点, 把自身的信息和已知的其他节点信息, 用 PING 消息发送给选出的节点;
+ * 而其他节点收到 PING 消息后, 也会把自己的信息和已知的其他节点信息, 用 PONG 消息返回给发送节点.
+ */
+
 #ifndef __CLUSTER_H
 #define __CLUSTER_H
 
@@ -84,10 +95,10 @@ typedef struct clusterLink {
  * kind of packet. PONG is the reply to ping, in the exact format as a PING,
  * while MEET is a special PING that forces the receiver to add the sender
  * as a node (if it is not already in the list). */
-#define CLUSTERMSG_TYPE_PING 0          /* Ping */
-#define CLUSTERMSG_TYPE_PONG 1          /* Pong (reply to Ping) */
-#define CLUSTERMSG_TYPE_MEET 2          /* Meet "let's join" message */
-#define CLUSTERMSG_TYPE_FAIL 3          /* Mark node xxx as failing */
+#define CLUSTERMSG_TYPE_PING 0          /* Ping消息, 用来向其它节点发送当前节点消息 */
+#define CLUSTERMSG_TYPE_PONG 1          /* Pong消息, 对应PING消息的回复 */
+#define CLUSTERMSG_TYPE_MEET 2          /* Meet消息, 表示某个节点要加入集群 */
+#define CLUSTERMSG_TYPE_FAIL 3          /* FAIL消息, 表示某个节点有故障 */
 #define CLUSTERMSG_TYPE_PUBLISH 4       /* Pub/Sub Publish propagation */
 #define CLUSTERMSG_TYPE_FAILOVER_AUTH_REQUEST 5 /* May I failover? */
 #define CLUSTERMSG_TYPE_FAILOVER_AUTH_ACK 6     /* Yes, you have my vote */
@@ -182,14 +193,14 @@ typedef struct clusterState {
  * to the first node, using the getsockname() function. Then we'll use this
  * address for all the next messages. */
 typedef struct {
-    char nodename[CLUSTER_NAMELEN];
-    uint32_t ping_sent;
-    uint32_t pong_received;
-    char ip[NET_IP_STR_LEN];  /* IP address last time it was seen */
-    uint16_t port;              /* base port last time it was seen */
-    uint16_t cport;             /* cluster port last time it was seen */
-    uint16_t flags;             /* node->flags copy */
-    uint32_t notused1;
+    char nodename[CLUSTER_NAMELEN];  //节点名称
+    uint32_t ping_sent;              //节点发送Ping的时间
+    uint32_t pong_received;          //节点收到Pong的时间
+    char ip[NET_IP_STR_LEN];         //节点IP
+    uint16_t port;                   //节点和客户端的通信端口
+    uint16_t cport;                  //节点用于集群通信的端口
+    uint16_t flags;                  //节点的标记
+    uint32_t notused1;               //未用字段
 } clusterMsgDataGossip;
 
 typedef struct {
@@ -215,29 +226,32 @@ typedef struct {
     unsigned char bulk_data[3]; /* 3 bytes just as placeholder. */
 } clusterMsgModule;
 
+/*
+ * 定义了节点间通信的实际消息体
+ */
 union clusterMsgData {
-    /* PING, MEET and PONG */
+    /* Ping、Pong和Meet消息类型对应的数据结构 */
     struct {
         /* Array of N clusterMsgDataGossip structures */
         clusterMsgDataGossip gossip[1];
     } ping;
 
-    /* FAIL */
+    /* Fail消息类型对应的数据结构 */
     struct {
         clusterMsgDataFail about;
     } fail;
 
-    /* PUBLISH */
+    /* Publish消息类型对应的数据结构 */
     struct {
         clusterMsgDataPublish msg;
     } publish;
 
-    /* UPDATE */
+    /* Update消息类型对应的数据结构 */
     struct {
         clusterMsgDataUpdate nodecfg;
     } update;
 
-    /* MODULE */
+    /* Module消息类型对应的数据结构 */
     struct {
         clusterMsgModule msg;
     } module;
@@ -245,6 +259,9 @@ union clusterMsgData {
 
 #define CLUSTER_PROTO_VER 1 /* Cluster bus protocol version. */
 
+/**
+ * 结构体 clusterMsg 表示 redis cluster 节点间通信的一条消息
+ */
 typedef struct {
     char sig[4];        /* Signature "RCmb" (Redis Cluster message bus). */
     uint32_t totlen;    /* Total length of this message */
@@ -259,7 +276,7 @@ typedef struct {
     uint64_t offset;    /* Master replication offset if node is a master or
                            processed replication offset if node is a slave. */
     char sender[CLUSTER_NAMELEN]; /* Name of the sender node */
-    unsigned char myslots[CLUSTER_SLOTS/8];
+    unsigned char myslots[CLUSTER_SLOTS/8]; /* 当前节点负责的slots */
     char slaveof[CLUSTER_NAMELEN];
     char myip[NET_IP_STR_LEN];    /* Sender IP, if not all zeroed. */
     char notused1[34];  /* 34 bytes reserved for future usage. */
@@ -267,7 +284,7 @@ typedef struct {
     uint16_t flags;      /* Sender node flags */
     unsigned char state; /* Cluster state from the POV of the sender */
     unsigned char mflags[3]; /* Message flags: CLUSTERMSG_FLAG[012]_... */
-    union clusterMsgData data;
+    union clusterMsgData data; /* 消息体 */
 } clusterMsg;
 
 #define CLUSTERMSG_MIN_LEN (sizeof(clusterMsg)-sizeof(union clusterMsgData))
