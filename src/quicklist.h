@@ -14,6 +14,9 @@
  *  任一一个条件满足, quicklist便可以在当前的quicklistnode中插入元素, 否则会新建一个quicklistnode.
  *  这样通过控制每个 quicklistNode 中, ziplist 的大小或是元素个数, 有效减少了在 ziplist 中新增或修改元素后,
  *  发生连锁更新的情况, 从而提供了更好的访问性能.
+ *
+ *  @see ziplist.h
+ *  @see listpack.h
  */
 
 #include <stdint.h> // for UINTPTR_MAX
