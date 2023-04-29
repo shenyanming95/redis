@@ -3427,10 +3427,12 @@ int processCommand(client *c) {
         return C_OK;
     }
 
-    /* If cluster is enabled perform the cluster redirection here.
-     * However we don't perform the redirection if:
-     * 1) The sender of this command is our master.
-     * 2) The command has no key arguments. */
+    /*
+     * redis server 在这判断是否需要请求集群模式的"请求重定向", 存在以下三种情况不需要重定向:
+     * 1) 集群模式没有启动
+     * 2) 发送这个命令的节点就是当前节点的master节点;
+     * 3) 这个命令没有包含Key参数并且不是EXEC命令
+     */
     if (server.cluster_enabled &&
         !(c->flags & CLIENT_MASTER) &&
         !(c->flags & CLIENT_LUA &&
@@ -3440,14 +3442,21 @@ int processCommand(client *c) {
     {
         int hashslot;
         int error_code;
+        // 查询当前命令可以被哪个集群节点处理
         clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,
                                         &hashslot,&error_code);
+        // 上一步返回的集群节点不为空, 或者不是当前节点时, 执行请求重定向
         if (n == NULL || n != server.cluster->myself) {
             if (c->cmd->proc == execCommand) {
+                // 若本次命令是EXEC命令(执行事务),
+                // 调用discardTransaction函数放弃整个事务, 清空之前缓存的命令队列, 放弃事务中 watch 的 key, 重置 client 的事务标记
                 discardTransaction(c);
             } else {
+                // 若本次命令是普通命令,
+                // 给当前 client 打上标记 CLIENT_DIRTY_EXEC, 若后面执行了 EXEC, 若存在这个标记就会放弃执行事务, 给客户端返回错误.
                 flagTransaction(c);
             }
+            // 执行请求重定向
             clusterRedirectClient(c,n,hashslot,error_code);
             return C_OK;
         }

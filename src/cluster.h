@@ -7,6 +7,30 @@
  * Gossip协议通过“随机挑选通信节点”的方式, 让节点信息在整个集群中传播:
  * 节点会以一定的频率从集群中随机挑选一些其他节点, 把自身的信息和已知的其他节点信息, 用 PING 消息发送给选出的节点;
  * 而其他节点收到 PING 消息后, 也会把自己的信息和已知的其他节点信息, 用 PONG 消息返回给发送节点.
+ *
+ * 而对于分布式节点来说, 当server发现client请求的数据不再本地时, 就需要“请求重定向”, 将请求转发到实际存储数据的集群节点,
+ * 默认实现是在 server.c 文件的 processCommand 函数调用 getNodeByQuery 函数判断是否需要重定向, 若该函数返回的结果
+ * 为空, 或者查询到的集群节点不是当前节点, processCommand 就会调用 clusterRedirectClient 来执行“请求重定向”.
+ * ====================================================================================================================
+ * redis-cluster 主要的数据结构：
+ * 1) clusterMsg: 集群节点通信的消息结构, 包含消息头和消息体. 消息头存储发送节点的自身信息, 消息体就是 clusterMsgData 结构;
+ * 2) clusterMsgData: 集群节点通信的消息体, 不同消息对应的消息体不一样, 它是一个 union 结构;
+ * 3) clusterMsgDataGossip: 理论上是真正的消息体结构, 包含一个集群节点的信息;
+ *
+ * redis-cluster 主要函数:
+ * 1) clusterCron: 周期性执行, 随机选一个节点, 调用 clusterSendPing 发送 PING 消息;
+ * 2) clusterSendPing: 向节点发送PING-PONG消息, 调用clusterBuildMessageHdr设置消息头, 调用clusterSetGossipEntry设置消息体, 调用clusterSendMessage发送消息;
+ * 3) clusterSendMessage: 实际发送消息
+ * 4) clusterReadHandler: 读取节点收到的消息, 调用clusterProcessPacket处理消息内容;
+ * 5) clusterProcessPacket: 处理节点收到的消息内容, 调用clusterProcessGossipSection处理消息体;
+ *
+ * redis-cluster 数据迁移过程的步骤:
+ * 1) 标记迁入/迁出节点：分别使用 CLUSTER SETSLOT 命令, 在对应集群节点上标记它为待迁入节点、待迁出节点
+ * 2) 获取待迁出的keys：使用 CLUSTER GETKEYSINSLOT 命令, 在待迁出集群节点, 表明要迁移的key数量.
+ * 3) 源节点实际迁移数据：在待迁出数据的源节点上执行 MIGRATE 命令, 指定哪些Key要迁出, 然后 redis 就会自动开始进行网络I/O传输.
+ * 4) 目的节点处理迁移数据：集群节点自动执行, 收到数据迁出节点发送的 RESTORE-ASKING 命令, 解析它并执行保存key的逻辑.
+ * 5) 标记迁移结果：在迁入节点上执行 CLUSTER SETSLOT 命令标记迁移slot的最终所属节点, 同时也在迁出节点执行 CLUSTER SETSLOT 命令标记迁移slot的最终属于节点
+ *                它会清除第1步标记的信息.
  */
 
 #ifndef __CLUSTER_H
@@ -154,10 +178,16 @@ typedef struct clusterState {
     int size;             /* Num of master nodes with at least one slot */
     dict *nodes;          /* Hash table of name -> clusterNode structures */
     dict *nodes_black_list; /* Nodes we don't re-add for a few seconds. */
-    clusterNode *migrating_slots_to[CLUSTER_SLOTS];
-    clusterNode *importing_slots_from[CLUSTER_SLOTS];
-    clusterNode *slots[CLUSTER_SLOTS];
+    clusterNode *migrating_slots_to[CLUSTER_SLOTS];   // 表示当前节点负责的 slot 正在迁往某个节点, 例如 migrating_slots_to[K]=node1, 表示当前节点负责的 slot-K, 正在迁往node1;
+    clusterNode *importing_slots_from[CLUSTER_SLOTS]; // 表示当前节点正在从某个节点迁入 slot, 例如 importing_slots_from[L]=node3, 表示当前节点正从 node3 迁入 slot-L;
+    clusterNode *slots[CLUSTER_SLOTS];                // 表示 16384 个 slot 是由哪些节点负责的, 例如 slots[M] = node2, 表示 slot-M 是由 node2 负责的;
     uint64_t slots_keys_count[CLUSTER_SLOTS];
+    /*
+     * 字典树, 用来记录 slot 和 Key 的对应关系, 可以通过它快速找到 slot 上有哪些 keys;
+     * 【获取key调用路径】:clusterCommand -> getKeysInSlot -> raxStart(迭代器)
+     * 【插入key调用路径】:dbAdd -> slotToKeyAdd -> slotToKeyUpdateKey -> raxInsert
+     * 【删除key调用路径】:dbAsyncDelete/dbSyncDelete -> slotToKeyDel -> slotToKeyUpdateKey -> raxRemove
+     */
     rax *slots_to_keys;
     /* The following fields are used to take the slave state on elections. */
     mstime_t failover_auth_time; /* Time of previous or next election. */

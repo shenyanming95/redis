@@ -53,7 +53,11 @@ void freeClientMultiState(client *c) {
     zfree(c->mstate.commands);
 }
 
-/* Add a new command into the MULTI commands queue */
+/*
+ * redis 的 MULTI 命令表示, 紧接它的多条命令是需要作为一个事务来执行,
+ * 因此它会把后续收到的命令缓存在 clieng 结构体的 mstate 变量中,
+ * 而这个变量就是 multiState 结构体, 里面记录了 MULTI 命令后的其它命令及其个数.
+ */
 void queueMultiCommand(client *c) {
     multiCmd *mc;
     int j;
@@ -85,6 +89,10 @@ void flagTransaction(client *c) {
         c->flags |= CLIENT_DIRTY_EXEC;
 }
 
+/*
+ * 当redis server收到客户端发送的 MULTI 命令后, 会调用这个函数,
+ * 将表示客户端的结构体变量 client 中设置 CLIENT_MULTI 标记.
+ */
 void multiCommand(client *c) {
     if (c->flags & CLIENT_MULTI) {
         addReplyError(c,"MULTI calls can not be nested");
